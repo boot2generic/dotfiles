@@ -1,0 +1,177 @@
+/* ============================================================
+ * Rofi Theme: Catppuccin Mocha
+ * A clean, centered launcher with rounded corners and blur
+ * ============================================================ */
+
+/* --- Color variables --- */
+* {
+    base:      #1e1e2e;
+    mantle:    #181825;
+    crust:     #11111b;
+    text:      #cdd6f4;
+    subtext0:  #a6adc8;
+    subtext1:  #bac2de;
+    surface0:  #313244;
+    surface1:  #45475a;
+    surface2:  #585b70;
+    overlay0:  #6c7086;
+    overlay1:  #7f849c;
+    blue:      #89b4fa;
+    lavender:  #b4befe;
+    sapphire:  #74c7ec;
+    sky:       #89dceb;
+    teal:      #94e2d5;
+    green:     #a6e3a1;
+    yellow:    #f9e2af;
+    peach:     #fab387;
+    maroon:    #eba0ac;
+    red:       #f38ba8;
+    mauve:     #cba6f7;
+    pink:      #f5c2e7;
+
+    /* Semantic mappings */
+    background-color:   @base;
+    foreground-color:   @text;
+    border-color:       @blue;
+    accent-color:       @blue;
+    urgent-color:       @red;
+    selected-bg:        @surface0;
+    selected-fg:        @blue;
+    placeholder-color:  @overlay0;
+}
+
+/* --- Window (outermost container) --- */
+window {
+    transparency:    "real";
+    location:        center;
+    anchor:          center;
+    width:           640px;
+
+    /* Catppuccin base with subtle border */
+    background-color: @base;
+    border:           2px solid;
+    border-color:     @blue;
+    border-radius:    14px;
+
+    /* Drop shadow */
+    x-offset: 0;
+    y-offset: 0;
+
+    padding:         0;
+    cursor:          "default";
+}
+
+/* --- Main layout box --- */
+mainbox {
+    background-color: transparent;
+    children:        [ inputbar, message, listview ];
+    spacing:         0px;
+    padding:         12px;
+}
+
+/* --- Search input bar --- */
+inputbar {
+    background-color: @mantle;
+    border-radius:    10px;
+    padding:          10px 14px;
+    margin:           0 0 10px 0;
+    spacing:          8px;
+    children:        [ prompt, textbox-prompt-colon, entry ];
+}
+
+prompt {
+    background-color: transparent;
+    text-color:       @blue;
+    font:             "JetBrains Mono Bold 11";
+}
+
+textbox-prompt-colon {
+    background-color: transparent;
+    text-color:       @overlay0;
+    str:              " ";
+}
+
+entry {
+    background-color: transparent;
+    text-color:       @text;
+    placeholder:      "Search...";
+    placeholder-color: @overlay0;
+    cursor:           text;
+    font:             "JetBrains Mono 11";
+}
+
+/* --- Results list --- */
+listview {
+    background-color: transparent;
+    columns:          1;
+    lines:            8;
+    spacing:          4px;
+    fixed-height:     true;
+    scrollbar:        false;
+}
+
+/* --- Individual result row --- */
+element {
+    background-color: transparent;
+    border-radius:    8px;
+    padding:          8px 12px;
+    spacing:          10px;
+    cursor:           pointer;
+    children:        [ element-icon, element-text ];
+}
+
+element-icon {
+    background-color: transparent;
+    size:             24px;
+    cursor:           inherit;
+}
+
+element-text {
+    background-color: transparent;
+    text-color:       @subtext1;
+    font:             "JetBrains Mono 10";
+    highlight:        bold @blue;
+    cursor:           inherit;
+}
+
+/* --- Selected row --- */
+element selected {
+    background-color: @surface0;
+    border-radius:    8px;
+}
+
+element selected .element-text {
+    text-color: @text;
+}
+
+/* --- Urgent row (for window switcher) --- */
+element urgent {
+    background-color: transparent;
+}
+
+element urgent .element-text {
+    text-color: @red;
+}
+
+/* --- Message area (shown on errors) --- */
+message {
+    background-color: @surface0;
+    border-radius:    8px;
+    padding:          8px 12px;
+    margin:           0 0 10px 0;
+}
+
+textbox {
+    background-color: transparent;
+    text-color:       @yellow;
+    font:             "JetBrains Mono 10";
+}
+
+/* --- Scrollbar (hidden, kept for reference) --- */
+scrollbar {
+    background-color: @surface0;
+    handle-color:     @overlay0;
+    handle-width:     4px;
+    border-radius:    2px;
+    width:            4px;
+}

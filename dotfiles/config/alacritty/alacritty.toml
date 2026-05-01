@@ -1,0 +1,110 @@
+# ============================================================
+# Alacritty Terminal Configuration
+# Theme: Cyberpunk Neon
+# Format: TOML (alacritty >= 0.12)
+# ============================================================
+
+[env]
+TERM       = "xterm-256color"
+COLORTERM  = "truecolor"
+
+[window]
+padding      = { x = 12, y = 10 }
+decorations  = "full"
+opacity      = 0.92
+startup_mode = "Windowed"
+dynamic_title = true
+
+[scrolling]
+history    = 10000
+multiplier = 3
+
+[font]
+normal      = { family = "JetBrainsMono Nerd Font", style = "Regular" }
+bold        = { family = "JetBrainsMono Nerd Font", style = "Bold" }
+italic      = { family = "JetBrainsMono Nerd Font", style = "Italic" }
+bold_italic = { family = "JetBrainsMono Nerd Font", style = "Bold Italic" }
+size        = 11.0
+offset      = { x = 0, y = 1 }
+
+# --- Colors: Cyberpunk Neon ---
+[colors]
+draw_bold_text_with_bright_colors = true
+
+[colors.primary]
+background        = "#0d0d1a"
+foreground        = "#e2e2ff"
+dim_foreground    = "#8888cc"
+bright_foreground = "#ffffff"
+
+[colors.cursor]
+text   = "#0d0d1a"
+cursor = "#00e5ff"
+
+[colors.vi_mode_cursor]
+text   = "#0d0d1a"
+cursor = "#ff00cc"
+
+[colors.selection]
+text       = "#0d0d1a"
+background = "#00e5ff"
+
+[colors.search.matches]
+foreground = "#0d0d1a"
+background = "#ffcc00"
+
+[colors.search.focused_match]
+foreground = "#0d0d1a"
+background = "#00e5ff"
+
+[colors.footer_bar]
+background = "#12121f"
+foreground = "#e2e2ff"
+
+[colors.normal]
+black   = "#080810"
+red     = "#ff0055"
+green   = "#00ff41"
+yellow  = "#ffcc00"
+blue    = "#9900ff"
+magenta = "#ff00cc"
+cyan    = "#00e5ff"
+white   = "#e2e2ff"
+
+[colors.bright]
+black   = "#1a1a2e"
+red     = "#ff3377"
+green   = "#33ff6a"
+yellow  = "#ffd633"
+blue    = "#bb33ff"
+magenta = "#ff33dd"
+cyan    = "#33eeff"
+white   = "#ffffff"
+
+[colors.dim]
+black   = "#0d0d1a"
+red     = "#99003a"
+green   = "#008f24"
+yellow  = "#8f7100"
+blue    = "#550099"
+magenta = "#99007a"
+cyan    = "#007f8f"
+white   = "#8888cc"
+
+[cursor]
+style            = { shape = "Block", blinking = "On" }
+blink_interval   = 600
+unfocused_hollow = true
+
+[mouse]
+hide_when_typing = true
+
+[keyboard]
+bindings = [
+    { key = "C", mods = "Control|Shift", action = "Copy" },
+    { key = "V", mods = "Control|Shift", action = "Paste" },
+    { key = "Plus",  mods = "Control", action = "IncreaseFontSize" },
+    { key = "Minus", mods = "Control", action = "DecreaseFontSize" },
+    { key = "Key0",  mods = "Control", action = "ResetFontSize" },
+    { key = "F11", action = "ToggleFullscreen" },
+]

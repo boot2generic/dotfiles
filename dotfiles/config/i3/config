@@ -1,0 +1,289 @@
+# ============================================================
+# i3 Window Manager Configuration
+# Theme: Cyberpunk Neon
+# ============================================================
+
+# --- Cyberpunk Neon color palette ---
+set $bg       #0d0d1a
+set $bg_dark  #080810
+set $surface  #12121f
+set $surface1 #1a1a2e
+set $surface2 #16213e
+set $text     #e2e2ff
+set $subtext  #8888cc
+set $overlay  #5555aa
+set $cyan     #00e5ff
+set $magenta  #ff00cc
+set $green    #00ff41
+set $yellow   #ffcc00
+set $orange   #ff6b35
+set $red      #ff0055
+set $purple   #9900ff
+
+# --- Modifier: Super key ---
+set $mod Mod4
+
+# --- Font ---
+font pango:JetBrains Mono 10
+
+# --- Gaps (built into i3 >= 4.22) ---
+gaps inner 5
+gaps outer 2
+
+# --- Borders ---
+# normal: shows title bar; pixel N: border only (no title)
+default_border normal 2
+default_floating_border normal 2
+hide_edge_borders none
+
+# Title bar font — single line using the session font above
+title_align center
+
+# --- Mouse interaction ---
+# Hold $mod and drag with the mouse to move/resize windows:
+#   $mod + LEFT-button  drag → move the window (floats it if tiled)
+#   $mod + RIGHT-button drag → resize from the nearest corner
+# Without the modifier, ordinary clicks still focus / interact normally.
+floating_modifier $mod
+
+# Allow tiled windows to be dragged by their titlebar OR by the modifier
+# (i3 ≥ 4.21 feature).  "modifier titlebar" means BOTH triggers work:
+#   • Click + hold the titlebar of a tiled window and drag → swap layout
+#   • $mod + drag (anywhere on the window) → same
+# Releases the drag on a target tile to swap, or on an empty area to
+# create a new container.
+tiling_drag modifier titlebar
+
+# --- Window colors ---
+# Class                  border    bg         text      indicator  child_border
+client.focused           $cyan     $surface1  $text     $cyan      $cyan
+client.focused_inactive  $surface1 $surface   $subtext  $surface1  $surface1
+client.unfocused         $bg_dark  $bg        $overlay  $bg_dark   $bg_dark
+client.urgent            $red      $bg_dark   $text     $red       $red
+client.placeholder       $surface  $surface   $subtext  $surface   $surface
+
+# ============================================================
+# Autostart
+# ============================================================
+
+# Compositor — use xrender backend (works without GPU/DRI2 on Hyper-V).
+# `exec_always` so config changes pick up on Mod+Shift+c reload.  pkill
+# the previous picom first because `picom -b` would otherwise error
+# "another instance is already running" and silently not take effect.
+exec_always --no-startup-id sh -c 'pkill -x picom 2>/dev/null; sleep 0.1; picom --config ~/.config/picom/picom.conf -b'
+
+# Notification daemon
+exec --no-startup-id dunst
+
+# Wallpaper
+exec --no-startup-id feh --bg-fill ~/.config/wallpaper/wallpaper.png
+
+# Status bar (kills+restarts on i3 reload via exec_always)
+exec_always --no-startup-id ~/.config/polybar/launch.sh
+
+# Network manager tray icon
+exec --no-startup-id nm-applet
+
+# NumLock on at X start
+exec --no-startup-id numlockx on
+
+# Auto-open a terminal on first login so the desktop isn't blank
+exec --no-startup-id alacritty
+
+# Desktop hardware monitor — single panel anchored top-right.
+# Uses exec_always + a launcher script that kills any existing conky
+# first, so Mod+Shift+c (i3 reload) cycles the panel cleanly.  Without
+# the kill, an old config (or an orphan conky-listen instance from a
+# previous repo version) would render on top of the new one.
+exec_always --no-startup-id ~/.config/conky/launch.sh
+
+# ============================================================
+# Keybindings — Applications
+# ============================================================
+
+# Terminal
+bindsym $mod+Return exec alacritty
+
+# Application launcher
+bindsym $mod+d exec --no-startup-id rofi -show drun
+
+# Window switcher
+bindsym $mod+Tab exec --no-startup-id rofi -show window
+
+# File manager
+bindsym $mod+e exec thunar
+
+# Browser — Debian ships Firefox as `firefox-esr` (no `firefox` symlink
+# on a stock install).  Swap to mullvad-browser, chromium, etc. by
+# changing this line and re-running `Mod+Shift+c` to reload i3.
+bindsym $mod+b exec firefox-esr
+
+# Screenshots → ~/Pictures with a `screenshot-` prefix so they sort
+# alongside any other shots and grep cleanly.  scrot's tokens:
+#   %Y %m %d → date,  %H %M %S → time,  $f → final filename (set by scrot)
+bindsym Print exec --no-startup-id \
+    mkdir -p ~/Pictures && scrot 'screenshot-%Y-%m-%d_%H-%M-%S.png' -e 'mv $f ~/Pictures/'
+
+# Screenshot region select
+bindsym $mod+Print exec --no-startup-id \
+    mkdir -p ~/Pictures && scrot -s 'screenshot-%Y-%m-%d_%H-%M-%S.png' -e 'mv $f ~/Pictures/'
+
+# Lock screen (Super+Shift+x or Super+Delete)
+bindsym $mod+Shift+x  exec --no-startup-id ~/.config/lockscreen/lock.sh
+bindsym $mod+Delete   exec --no-startup-id ~/.config/lockscreen/lock.sh
+
+# ============================================================
+# Media keys
+# ============================================================
+# Two ways to drive these — the standard XF86Audio* keys (laptop media
+# row, Bluetooth headset buttons, etc.) AND a Mod+F-row fallback for
+# desktops without dedicated media keys.
+#
+# Helper scripts (~/.config/i3/scripts/) wrap pactl + playerctl and emit
+# dunst notifications so the user sees the volume/track update.
+
+# --- Volume (PulseAudio) ---
+bindsym XF86AudioRaiseVolume exec --no-startup-id ~/.config/i3/scripts/volume.sh up
+bindsym XF86AudioLowerVolume exec --no-startup-id ~/.config/i3/scripts/volume.sh down
+bindsym XF86AudioMute        exec --no-startup-id ~/.config/i3/scripts/volume.sh mute
+bindsym XF86AudioMicMute     exec --no-startup-id ~/.config/i3/scripts/volume.sh mute-mic
+
+# Fallback for keyboards without an XF86Audio* row (Mod = Super):
+#   Mod+F11 = volume down,  Mod+F12 = volume up,  Mod+m = mute toggle
+bindsym $mod+F11  exec --no-startup-id ~/.config/i3/scripts/volume.sh down
+bindsym $mod+F12  exec --no-startup-id ~/.config/i3/scripts/volume.sh up
+bindsym $mod+m    exec --no-startup-id ~/.config/i3/scripts/volume.sh mute
+
+# --- Playback (any MPRIS player: Spotify, mpv, Firefox, VLC, …) ---
+bindsym XF86AudioPlay  exec --no-startup-id ~/.config/i3/scripts/media.sh playpause
+bindsym XF86AudioPause exec --no-startup-id ~/.config/i3/scripts/media.sh playpause
+bindsym XF86AudioNext  exec --no-startup-id ~/.config/i3/scripts/media.sh next
+bindsym XF86AudioPrev  exec --no-startup-id ~/.config/i3/scripts/media.sh prev
+bindsym XF86AudioStop  exec --no-startup-id ~/.config/i3/scripts/media.sh stop
+
+# Fallback bindings — Mod+F8/9/10 = prev / play-pause / next
+bindsym $mod+F8   exec --no-startup-id ~/.config/i3/scripts/media.sh prev
+bindsym $mod+F9   exec --no-startup-id ~/.config/i3/scripts/media.sh playpause
+bindsym $mod+F10  exec --no-startup-id ~/.config/i3/scripts/media.sh next
+
+# ============================================================
+# Keybindings — Window manager
+# ============================================================
+
+bindsym $mod+Shift+q kill
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec "i3-nagbar -t warning \
+    -m 'Exit i3? Your session will end.' \
+    -B 'Yes, exit' 'i3-msg exit'"
+
+# --- Focus (Vim + arrows) ---
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+bindsym $mod+Left  focus left
+bindsym $mod+Down  focus down
+bindsym $mod+Up    focus up
+bindsym $mod+Right focus right
+
+# --- Move ---
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+bindsym $mod+Shift+Left  move left
+bindsym $mod+Shift+Down  move down
+bindsym $mod+Shift+Up    move up
+bindsym $mod+Shift+Right move right
+
+# --- Splits ---
+bindsym $mod+backslash splith
+bindsym $mod+minus     splitv
+
+# --- Layout ---
+bindsym $mod+s layout stacking
+bindsym $mod+w layout tabbed
+bindsym $mod+t layout toggle split
+bindsym $mod+f fullscreen toggle
+
+# --- Floating ---
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space       focus mode_toggle
+bindsym $mod+a           focus parent
+
+# --- Scratchpad ---
+bindsym $mod+Shift+grave move scratchpad
+bindsym $mod+grave       scratchpad show
+
+# ============================================================
+# Workspaces
+# ============================================================
+
+set $ws1  "1"
+set $ws2  "2"
+set $ws3  "3"
+set $ws4  "4"
+set $ws5  "5"
+set $ws6  "6"
+set $ws7  "7"
+set $ws8  "8"
+set $ws9  "9"
+set $ws10 "10"
+
+bindsym $mod+1 workspace number $ws1
+bindsym $mod+2 workspace number $ws2
+bindsym $mod+3 workspace number $ws3
+bindsym $mod+4 workspace number $ws4
+bindsym $mod+5 workspace number $ws5
+bindsym $mod+6 workspace number $ws6
+bindsym $mod+7 workspace number $ws7
+bindsym $mod+8 workspace number $ws8
+bindsym $mod+9 workspace number $ws9
+bindsym $mod+0 workspace number $ws10
+
+bindsym $mod+Shift+1 move container to workspace number $ws1
+bindsym $mod+Shift+2 move container to workspace number $ws2
+bindsym $mod+Shift+3 move container to workspace number $ws3
+bindsym $mod+Shift+4 move container to workspace number $ws4
+bindsym $mod+Shift+5 move container to workspace number $ws5
+bindsym $mod+Shift+6 move container to workspace number $ws6
+bindsym $mod+Shift+7 move container to workspace number $ws7
+bindsym $mod+Shift+8 move container to workspace number $ws8
+bindsym $mod+Shift+9 move container to workspace number $ws9
+bindsym $mod+Shift+0 move container to workspace number $ws10
+
+bindsym $mod+period workspace next
+bindsym $mod+comma  workspace prev
+
+# --- Window assignments ---
+assign [class="firefox"] $ws2
+assign [class="Thunar"]  $ws3
+
+# --- Floating rules ---
+for_window [class="Pavucontrol"]            floating enable, resize set 700 450
+for_window [class="Nm-connection-editor"]   floating enable
+for_window [class="Arandr"]                 floating enable, resize set 800 600
+for_window [class="lxappearance"]           floating enable, resize set 700 450
+for_window [window_role="pop-up"]           floating enable
+for_window [window_role="task_dialog"]      floating enable
+for_window [title="Preferences$"]          floating enable
+
+# ============================================================
+# Resize mode
+# ============================================================
+
+mode "resize" {
+    bindsym h resize shrink width  10 px or 10 ppt
+    bindsym j resize grow   height 10 px or 10 ppt
+    bindsym k resize shrink height 10 px or 10 ppt
+    bindsym l resize grow   width  10 px or 10 ppt
+    bindsym Left  resize shrink width  10 px or 10 ppt
+    bindsym Down  resize grow   height 10 px or 10 ppt
+    bindsym Up    resize shrink height 10 px or 10 ppt
+    bindsym Right resize grow   width  10 px or 10 ppt
+    bindsym Return mode "default"
+    bindsym Escape mode "default"
+    bindsym $mod+r mode "default"
+}
+bindsym $mod+r mode "resize"

@@ -1,0 +1,122 @@
+/* ============================================================
+ * Rofi Theme: Cyberpunk Neon
+ * ============================================================ */
+
+* {
+    bg:       #0d0d1a;
+    surface:  #12121f;
+    surface1: #1a1a2e;
+    text:     #e2e2ff;
+    subtext:  #8888cc;
+    overlay:  #5555aa;
+    cyan:     #00e5ff;
+    magenta:  #ff00cc;
+    green:    #00ff41;
+    yellow:   #ffcc00;
+    red:      #ff0055;
+    trans:    rgba(0,0,0,0);
+
+    background-color: @trans;
+    text-color:       @text;
+    font:             "JetBrains Mono 11";
+}
+
+window {
+    width:            640px;
+    background-color: @bg;
+    border:           2px solid;
+    border-color:     @cyan;
+    border-radius:    12px;
+    padding:          0;
+}
+
+mainbox {
+    background-color: @trans;
+    children:         [ inputbar, listview, message ];
+    spacing:          0;
+    padding:          10px;
+}
+
+inputbar {
+    background-color: @surface;
+    border-radius:    8px;
+    padding:          10px 14px;
+    margin:           0 0 8px 0;
+    spacing:          8px;
+    children:         [ prompt, entry ];
+}
+
+prompt {
+    background-color: @trans;
+    text-color:       @cyan;
+    font:             "JetBrains Mono Bold 11";
+}
+
+entry {
+    background-color: @trans;
+    text-color:       @text;
+    placeholder:      "Search...";
+    placeholder-color: @overlay;
+    cursor:           text;
+}
+
+listview {
+    background-color: @trans;
+    spacing:          2px;
+    padding:          2px 0;
+    lines:            10;
+    columns:          1;
+    scrollbar:        true;
+}
+
+scrollbar {
+    background-color: @surface;
+    handle-color:     @overlay;
+    handle-width:     4px;
+    border-radius:    2px;
+    width:            4px;
+}
+
+element {
+    padding:          8px 12px;
+    border-radius:    6px;
+    spacing:          8px;
+    background-color: @trans;
+    text-color:       @text;
+}
+
+element selected {
+    background-color: @surface1;
+    text-color:       @cyan;
+}
+
+element urgent {
+    text-color: @red;
+}
+
+element active {
+    text-color: @cyan;
+}
+
+element-icon {
+    size:             24px;
+    background-color: @trans;
+}
+
+element-text {
+    background-color: @trans;
+    text-color:       inherit;
+    highlight:        bold @cyan;
+}
+
+message {
+    background-color: @surface;
+    border-radius:    6px;
+    padding:          6px 12px;
+    margin:           8px 0 0 0;
+}
+
+textbox {
+    background-color: @trans;
+    text-color:       @yellow;
+}
