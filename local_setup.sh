@@ -181,6 +181,20 @@ detect_gpu() {
   fi
 }
 
+detect_cpu() {
+  # CPU vendor drives whether we install thermald (Intel-only thermal
+  # daemon) — on AMD the dameon is a no-op, so we skip it to keep the
+  # apt graph minimal.  /proc/cpuinfo is always present and parsable.
+  local vendor
+  vendor="$(awk -F: '/^vendor_id/ {gsub(/ /,"",$2); print $2; exit}' \
+              /proc/cpuinfo 2>/dev/null)"
+  case "${vendor:-}" in
+    GenuineIntel) CPU_VENDOR="intel" ;;
+    AuthenticAMD) CPU_VENDOR="amd"   ;;
+    *)            CPU_VENDOR="other" ;;
+  esac
+}
+
 print_hardware() {
   echo
   log "Detection summary"
@@ -189,6 +203,7 @@ print_hardware() {
   printf "    %-12s %s\n" "DMI vendor"  "${DMI_VENDOR:-unknown}"
   printf "    %-12s %s\n" "DMI product" "${DMI_PRODUCT:-unknown}"
   printf "    %-12s %s\n" "GPU vendor"  "$GPU_VENDOR"
+  printf "    %-12s %s\n" "CPU vendor"  "${CPU_VENDOR:-unknown}"
   if [[ -n "${GPU_RAW:-}" ]]; then
     while IFS= read -r line; do
       printf "    %-12s %s\n" "  PCI" "${line:0:90}"
@@ -236,6 +251,17 @@ BASE_PACKAGES=(
   # Utilities
   numlockx arandr xclip xdotool brightnessctl
   i3lock imagemagick python3-pil
+  # Network diagnostics + radio toggle.  `iw` exposes signal/bitrate/SSID
+  # for low-level wifi troubleshooting (`iw dev wlan0 link`); `rfkill`
+  # backs the XF86WLAN keybind that toggles the wireless radio.  The
+  # connection manager itself (NetworkManager + nm-applet) is already
+  # listed above — these are the CLI-level helpers.
+  iw rfkill
+  # Battery / power management.  TLP is the canonical ThinkPad win:
+  # default profile drops idle power 20-40% with no user config.
+  # `acpi` gives a one-line battery summary used by polybar's fallback;
+  # `powertop` is on-demand only (run `sudo powertop` to audit drains).
+  tlp tlp-rdw acpi powertop
   # wmctrl + x11-utils (xprop / xwininfo / xdpyinfo) — kept around
   # as desktop-environment diagnostic tools.  An earlier revision of
   # config/conky/launch.sh used them for a keep-below daemon; that's
@@ -270,6 +296,12 @@ HYPERV_PACKAGES=(hyperv-daemons)
 QEMU_PACKAGES=(qemu-guest-agent spice-vdagent xserver-xorg-video-qxl)
 VMWARE_PACKAGES=(open-vm-tools open-vm-tools-desktop xserver-xorg-video-vmware)
 VBOX_PACKAGES=(virtualbox-guest-utils virtualbox-guest-x11)
+
+# Per-CPU-vendor extras.  thermald is Intel-only (it reads MSRs that
+# only exist on Intel CPUs).  On physical Intel hardware it provides
+# meaningful protection against thermal throttling spirals; in VMs the
+# MSRs aren't exposed so we skip it there too.
+INTEL_CPU_PACKAGES=(thermald)
 
 # ============================================================
 # Install phase
@@ -340,7 +372,7 @@ enable_nonfree() {
 }
 
 driver_packages_for() {
-  # Echo the package list for the detected GPU + virt combo.
+  # Echo the package list for the detected GPU + virt + CPU combo.
   local pkgs=()
 
   case "$GPU_VENDOR" in
@@ -359,6 +391,12 @@ driver_packages_for() {
       esac
       ;;
   esac
+
+  # thermald only on physical Intel boxes — pointless inside a VM where
+  # MSRs aren't exposed, and irrelevant on AMD where it doesn't run.
+  if [[ "$VIRT_TYPE" == "physical" && "$CPU_VENDOR" == "intel" ]]; then
+    pkgs+=("${INTEL_CPU_PACKAGES[@]}")
+  fi
 
   printf '%s\n' "${pkgs[@]}"
 }
@@ -474,6 +512,29 @@ install_phase() {
     apt_install "drivers" "${drivers[@]}"
   else
     log "No extra driver packages required for this hardware"
+  fi
+
+  enable_power_services
+}
+
+enable_power_services() {
+  # TLP — power-saving daemon.  Defaults are sane for laptops and give a
+  # 20-40% idle-power win on ThinkPads with no user tuning.  Conflicts
+  # with power-profiles-daemon, which we don't install.  Skipped inside
+  # VMs (no battery) and on hyperv (host owns power).
+  if [[ "$VIRT_TYPE" != "physical" ]]; then
+    log "Skipping TLP enable — not a physical machine"
+  elif dpkg -l tlp 2>/dev/null | grep -q '^ii'; then
+    sudo systemctl enable --now tlp >/dev/null 2>&1 \
+      && ok "tlp enabled (power management active)" \
+      || warn "tlp enable failed — check \`systemctl status tlp\`"
+  fi
+  # thermald — Intel-only; only present in apt graph when detect_cpu
+  # said "intel" AND we're physical, so the dpkg gate is sufficient.
+  if dpkg -l thermald 2>/dev/null | grep -q '^ii'; then
+    sudo systemctl enable --now thermald >/dev/null 2>&1 \
+      && ok "thermald enabled (Intel thermal protection active)" \
+      || warn "thermald enable failed — check \`systemctl status thermald\`"
   fi
 }
 
@@ -907,6 +968,18 @@ declare -a VAL_CHECKS=(
   "wg|command -v wg"
   "polybar mullvad-status|test -x ${HOME}/.config/polybar/scripts/mullvad-status.sh"
   "polybar wireguard-status|test -x ${HOME}/.config/polybar/scripts/wireguard-status.sh"
+  "NetworkManager active|systemctl is-active NetworkManager"
+  "nm-applet|command -v nm-applet"
+  "nm-connection-editor|command -v nm-connection-editor"
+  "nmcli|command -v nmcli"
+  # iw / rfkill / powertop / tlp-stat live in /usr/sbin, which is NOT on
+  # a non-root user's PATH on Debian (see /etc/profile).  Fall back to a
+  # direct test on the absolute path so the validation passes for a
+  # regular user without forcing them to source root's profile.
+  "iw|command -v iw || test -x /usr/sbin/iw"
+  "rfkill|command -v rfkill || test -x /usr/sbin/rfkill"
+  "acpi|command -v acpi"
+  "powertop|command -v powertop || test -x /usr/sbin/powertop"
 )
 
 # ============================================================
@@ -1207,6 +1280,42 @@ validate_phase() {
       failures=$((failures + 1))
     fi
   fi
+  # tlp + thermald only relevant on physical machines.  thermald layers
+  # an additional Intel-only condition on top.
+  if [[ "$VIRT_TYPE" == "physical" ]]; then
+    if systemctl is-active tlp >/dev/null 2>&1; then
+      printf "  [ ok ]  tlp service active\n"
+    else
+      printf "  [FAIL]  tlp service (run: sudo systemctl enable --now tlp)\n"
+      failures=$((failures + 1))
+    fi
+    # Battery sysfs presence — ThinkPads expose BAT0 (most) or BAT1
+    # (some X1 / dual-battery models).  Either is fine; at least one
+    # must exist on a laptop or our polybar battery module won't render.
+    if compgen -G '/sys/class/power_supply/BAT*' >/dev/null; then
+      printf "  [ ok ]  battery detected (%s)\n" \
+        "$(ls -d /sys/class/power_supply/BAT* 2>/dev/null \
+            | xargs -n1 basename | tr '\n' ' ')"
+    else
+      # Desktops have no battery; only flag this on Intel laptops where
+      # we'd otherwise expect one.  Heuristic: chassis type via DMI.
+      local chassis
+      chassis="$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo)"
+      # Chassis types 8/9/10/14 = portable/laptop/notebook/sub-notebook
+      if [[ "$chassis" =~ ^(8|9|10|14)$ ]]; then
+        printf "  [FAIL]  no battery detected on a laptop chassis\n"
+        failures=$((failures + 1))
+      fi
+    fi
+    if [[ "$CPU_VENDOR" == "intel" ]]; then
+      if systemctl is-active thermald >/dev/null 2>&1; then
+        printf "  [ ok ]  thermald active\n"
+      else
+        printf "  [FAIL]  thermald (run: sudo systemctl enable --now thermald)\n"
+        failures=$((failures + 1))
+      fi
+    fi
+  fi
 
   echo
   if [[ "$failures" -eq 0 ]]; then
@@ -1242,6 +1351,9 @@ This stage will:
     open-vm-tools, hyperv-daemons, …)
   • Install Mullvad VPN from its official apt repo
   • Install WireGuard userland (wg, wg-quick)
+  • Install power management: TLP + acpi + powertop
+    (thermald added on Intel hardware) — TLP enabled automatically
+  • Install network helpers: iw, rfkill (NetworkManager already in base)
   • Time: 3–10 minutes (depends on network)
 EOF
       ;;
@@ -1378,6 +1490,7 @@ done
 ensure_detection_tools
 detect_virt
 detect_gpu
+detect_cpu
 [[ -n "$FORCE_VIRT" ]] && VIRT_TYPE="$FORCE_VIRT"
 [[ -n "$FORCE_GPU"  ]] && GPU_VENDOR="$FORCE_GPU"
 print_hardware

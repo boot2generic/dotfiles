@@ -145,6 +145,10 @@ The single most-used keybinds. Each tool has its own page with the full set.
 | `Mod+Shift+q`            | Kill focused window                 |
 | `Mod+Shift+x` / `Mod+Del`| Lock screen                         |
 | `Mod+Shift+e`            | Quit i3 (logout — confirms first)   |
+| `Mod+Shift+w`            | Network: nm-connection-editor (GUI) |
+| `Mod+n`                  | Network: nmtui (TUI in alacritty)   |
+| `XF86WLAN` (Fn+F8)       | Toggle wifi radio (rfkill)          |
+| `XF86MonBrightness*`     | Brightness up / down (5% steps)     |
 | `Print` / `Mod+Print`    | Screenshot full / region            |
 
 ### Media keys
@@ -292,3 +296,6 @@ tool because each uses its own format. If you re-theme, search the repo for
 | `tree-sitter compile errors` (`stdio.h`)      | Install `build-essential` (libc6-dev was missing)                   |
 | `default shell still bash after setup`        | `sudo chsh -s "$(command -v zsh)" $USER`, then log out/in           |
 | `RDP / xrdp not running`                      | Intentionally not installed — `sudo apt install xrdp xorgxrdp` then re-run `deploy-configs`/`deploy` |
+| `polybar battery shows wrong %` or missing    | Wrong `BAT0`/`ADP1` for this hardware — `ls /sys/class/power_supply/`, edit `[module/battery]` to match |
+| `iw / rfkill / tlp-stat: command not found`   | `/usr/sbin` not on PATH — re-source `~/.zshrc` (the dotfiles append it on login) |
+| `tlp inactive on a laptop`                    | `sudo systemctl enable --now tlp` — the install script enables it only on physical hardware |

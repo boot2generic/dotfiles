@@ -167,6 +167,31 @@ bindsym $mod+F9   exec --no-startup-id ~/.config/i3/scripts/media.sh playpause
 bindsym $mod+F10  exec --no-startup-id ~/.config/i3/scripts/media.sh next
 
 # ============================================================
+# Brightness keys (laptops)
+# ============================================================
+# `brightnessctl` is part of BASE_PACKAGES.  Step size 5% is a good
+# balance between fine control and minimum keypresses to go from 0→100%.
+# `--exponent 4` would give finer control at the dim end if you want it
+# later — leaving linear default for now since it matches most desktops.
+bindsym XF86MonBrightnessUp   exec --no-startup-id brightnessctl set +5%
+bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+
+# ============================================================
+# Network keys
+# ============================================================
+# Mod+Shift+w → full GUI: edit profiles, manage VPNs, certs, secrets.
+# Mod+n       → TUI fallback for SSH-on-the-laptop or no-X scenarios.
+# XF86WLAN    → physical airplane-mode key on most ThinkPads (Fn+F8 / F9).
+#               `rfkill toggle wifi` flips the radio at the kernel level
+#               so NetworkManager sees the change immediately.
+bindsym $mod+Shift+w  exec --no-startup-id nm-connection-editor
+bindsym $mod+n        exec --no-startup-id alacritty -e nmtui
+# /usr/sbin/rfkill — non-root users on Debian don't have /usr/sbin in
+# PATH, so spell the absolute path out.  /dev/rfkill is rw for `netdev`
+# group + the active session via systemd-logind ACL, so no sudo needed.
+bindsym XF86WLAN      exec --no-startup-id /usr/sbin/rfkill toggle wifi
+
+# ============================================================
 # Keybindings — Window manager
 # ============================================================
 

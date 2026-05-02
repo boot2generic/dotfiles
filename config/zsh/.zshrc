@@ -42,6 +42,17 @@ export XDG_CACHE_HOME="$HOME/.cache"
 # Local binaries
 export PATH="$HOME/.local/bin:$PATH"
 
+# /usr/sbin houses tools we *use* as a regular user — `tlp-stat`,
+# `iw dev`, `rfkill list`, `powertop`, `nft list ruleset`, …  Debian's
+# default /etc/profile only adds /usr/sbin for root, which makes the
+# bare commands in `readme/system.md` and friends silently fail for
+# everyone else.  Append (don't prepend) so /usr/bin still wins on the
+# rare collision.
+case ":$PATH:" in
+  *":/usr/sbin:"*) ;;
+  *) export PATH="$PATH:/usr/sbin" ;;
+esac
+
 # ── History ──────────────────────────────────────────────────
 HISTSIZE=50000
 SAVEHIST=50000

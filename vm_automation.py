@@ -218,6 +218,14 @@ def run_root(command: str, timeout: int = 300) -> tuple[int, str]:
     once NOPASSWD is configured, so no pexpect session is needed — output
     capture is identical to run().
 
+    NOTE on log files: the redirect inside `bash -c` runs as root.  Debian's
+    `fs.protected_regular = 2` blocks root from O_CREAT|O_TRUNC on a regular
+    file in a sticky world-writable dir (/tmp) when the file is owned by
+    another user.  So every log path used by a run_root caller is prefixed
+    `/tmp/vma_*.log` — that namespace is never touched by local_setup.sh
+    (which uses `/tmp/<name>.log` from the user's bash redirect), so the
+    two scripts can run on the same VM without clobbering each other.
+
     Bootstrap sudo first with: python3 vm_automation.py bootstrap
     """
     return run(f"sudo bash -c {shlex.quote(command)}", timeout=timeout)
@@ -340,7 +348,7 @@ def bootstrap_sudo() -> int:
     cmds = [
         "export PATH=/usr/local/sbin:/usr/sbin:/sbin:$PATH",
         "DEBIAN_FRONTEND=noninteractive apt-get install -y sudo "
-        ">/tmp/sudo_install.log 2>&1",
+        ">/tmp/vma_sudo_install.log 2>&1",
         # Write sudoers drop-in (no spaces around > to avoid shell issues)
         f"echo '{sudoers_line}' >/etc/sudoers.d/{VM_USER}",
         f"chmod 440 /etc/sudoers.d/{VM_USER}",
@@ -487,6 +495,21 @@ BASE_PACKAGES = [
     "numlockx", "arandr", "xclip", "xdotool", "brightnessctl",
     "i3lock", "imagemagick", "python3-pil",
 
+    # Network diagnostics + radio toggle.  `iw` exposes signal/bitrate/SSID
+    # for low-level wifi troubleshooting (`iw dev wlan0 link`); `rfkill`
+    # backs the i3 XF86WLAN keybind that flips the wireless radio.  The
+    # connection manager itself (NetworkManager + nm-applet) is already
+    # listed above — these are the CLI-level helpers.
+    "iw", "rfkill",
+
+    # Battery / power management.  TLP is a no-op inside a Hyper-V VM
+    # (no battery, no laptop hardware) but ships in BASE_PACKAGES to
+    # keep parity with local_setup.sh — the package's postinst enables
+    # the service, but it stays inactive when no power-supply sysfs
+    # entries exist.  `acpi` / `powertop` are likewise harmless inside
+    # the VM and useful when the same dotfiles deploy onto a laptop.
+    "tlp", "tlp-rdw", "acpi", "powertop",
+
     # Terminal tools (tmux / neovim / zsh stack)
     "tmux", "neovim", "zsh", "fzf", "ripgrep", "fd-find",
     "build-essential",     # gcc + g++ + make + libc6-dev — needed to build
@@ -525,7 +548,11 @@ BASE_PACKAGES = [
 NVIDIA_PACKAGES = [
     "nvidia-driver",
     "nvidia-settings",
-    "nvidia-smi",
+    # Note: there is NO Debian package called `nvidia-smi`.  The binary
+    # of that name ships inside `nvidia-driver` (specifically nvidia-utils,
+    # which `nvidia-driver` depends on).  Listing it here used to make
+    # `apt-get install -y` fail with "Unable to locate package nvidia-smi"
+    # on every NVIDIA setup attempt.
 ]
 
 
@@ -561,9 +588,9 @@ def install_gui(
     print(f"[*] {len(packages)} packages queued")
 
     print("[*] Updating apt cache …")
-    rc, out = run_root("apt-get update -qq >/tmp/apt_update.log 2>&1", timeout=120)
+    rc, out = run_root("apt-get update -qq >/tmp/vma_apt_update.log 2>&1", timeout=120)
     if rc != 0:
-        _, log = run("tail -20 /tmp/apt_update.log")
+        _, log = run("tail -20 /tmp/vma_apt_update.log")
         print(log)
         print(f"[!] apt update failed (exit {rc})")
         return rc
@@ -572,11 +599,11 @@ def install_gui(
     pkg_str = " ".join(packages)
     rc, out = run_root(
         f"DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-        f"{pkg_str} >/tmp/apt_install.log 2>&1",
+        f"{pkg_str} >/tmp/vma_apt_install.log 2>&1",
         timeout=900,
     )
     if verbose:
-        _, log = run("tail -30 /tmp/apt_install.log")
+        _, log = run("tail -30 /tmp/vma_apt_install.log")
         print(log.strip())
     if rc != 0:
         print(f"[!] apt install failed (exit {rc})")
@@ -792,15 +819,15 @@ def install_nvidia_drivers() -> int:
     retained for cases where you want to retry just the driver install.
     """
     enable_nonfree_repos()
-    run_root("apt-get update -qq >/tmp/apt_update.log 2>&1", timeout=120)
+    run_root("apt-get update -qq >/tmp/vma_apt_update.log 2>&1", timeout=120)
 
     print("[*] Installing NVIDIA driver …")
     rc, out = run_root(
         f"DEBIAN_FRONTEND=noninteractive apt-get install -y "
-        f"{' '.join(NVIDIA_PACKAGES)} >/tmp/apt_nvidia.log 2>&1",
+        f"{' '.join(NVIDIA_PACKAGES)} >/tmp/vma_apt_nvidia.log 2>&1",
         timeout=600,
     )
-    _, log = run("tail -10 /tmp/apt_nvidia.log")
+    _, log = run("tail -10 /tmp/vma_apt_nvidia.log")
     print(log.strip())
     if rc != 0:
         print(f"[!] NVIDIA install failed (exit {rc})")
@@ -1275,7 +1302,7 @@ echo OK
         errors += 1
 
     # lm-sensors auto-detect (non-fatal)
-    rc, _ = run_root("sensors-detect --auto >/tmp/sensors.log 2>&1 || true")
+    rc, _ = run_root("sensors-detect --auto >/tmp/vma_sensors.log 2>&1 || true")
     print("    [ok] sensors-detect run")
 
     # Neovim headless plugin sync (lazy.nvim) + treesitter parser compile.
@@ -1353,6 +1380,17 @@ VALIDATION_CHECKS = [
     ("wg",                  "which wg"),
     ("polybar mullvad-status.sh",  "test -x ~/.config/polybar/scripts/mullvad-status.sh && echo ok"),
     ("polybar wireguard-status.sh","test -x ~/.config/polybar/scripts/wireguard-status.sh && echo ok"),
+    # Network manager UIs + low-level helpers.  iw / rfkill / powertop
+    # live in /usr/sbin which is NOT on a non-root SSH session's PATH;
+    # fall back to an absolute-path test so the check passes.
+    ("NetworkManager active",      "systemctl is-active NetworkManager 2>/dev/null"),
+    ("nm-applet",                  "which nm-applet"),
+    ("nm-connection-editor",       "which nm-connection-editor"),
+    ("nmcli",                      "which nmcli"),
+    ("iw",                         "command -v iw 2>/dev/null || (test -x /usr/sbin/iw && echo /usr/sbin/iw)"),
+    ("rfkill",                     "command -v rfkill 2>/dev/null || (test -x /usr/sbin/rfkill && echo /usr/sbin/rfkill)"),
+    ("acpi",                       "which acpi"),
+    ("powertop",                   "command -v powertop 2>/dev/null || (test -x /usr/sbin/powertop && echo /usr/sbin/powertop)"),
 ]
 
 HYPERV_CHECKS = [
@@ -1537,7 +1575,7 @@ def harden_ufw() -> int:
     # PATH for the SSH-launched non-interactive shell.
     cmds = (
         "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw "
-        ">/tmp/apt_ufw.log 2>&1 && "
+        ">/tmp/vma_apt_ufw.log 2>&1 && "
         "/usr/sbin/ufw default deny incoming   >/dev/null && "
         "/usr/sbin/ufw default allow outgoing  >/dev/null && "
         "/usr/sbin/ufw allow ssh               >/dev/null && "
@@ -1567,7 +1605,7 @@ def harden_uu() -> int:
     print("[*] Enabling unattended-upgrades (Debian-Security only) …")
     cmds = (
         "DEBIAN_FRONTEND=noninteractive apt-get install -y "
-        "unattended-upgrades apt-listchanges >/tmp/apt_uu.log 2>&1 && "
+        "unattended-upgrades apt-listchanges >/tmp/vma_apt_uu.log 2>&1 && "
         "cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'\n"
         'APT::Periodic::Update-Package-Lists "1";\n'
         'APT::Periodic::Unattended-Upgrade "1";\n'
@@ -1598,7 +1636,7 @@ def harden_dns() -> int:
     print("[*] Configuring systemd-resolved — Quad9 DoT + DNSSEC …")
     cmds = (
         "DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-resolved "
-        ">/tmp/apt_resolved.log 2>&1\n"
+        ">/tmp/vma_apt_resolved.log 2>&1\n"
         "install -d -m 0755 /etc/systemd/resolved.conf.d\n"
         "cat > /etc/systemd/resolved.conf.d/dnsovertls.conf <<'EOF'\n"
         "[Resolve]\n"

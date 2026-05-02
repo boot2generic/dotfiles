@@ -81,6 +81,10 @@ edit the relevant `bindsym` lines in `~/.config/i3/config` (search for
 
 ## Screen brightness (brightnessctl)
 
+`XF86MonBrightnessUp` / `XF86MonBrightnessDown` (Fn+F5/F6 on most ThinkPads)
+adjust brightness in 5% steps. The keybinds are wired in i3 — no extra
+config needed if your laptop has brightness keys.
+
 ```bash
 brightnessctl                  # show current
 brightnessctl set 50%
@@ -89,13 +93,8 @@ brightnessctl set 10%-
 brightnessctl set 0
 ```
 
-Wire it to keys in i3:
-```bash
-bindsym XF86MonBrightnessUp   exec brightnessctl set +5%
-bindsym XF86MonBrightnessDown exec brightnessctl set 5%-
-```
-
-(No keybind shipped by default — desktops often don't have brightness keys.)
+To remap step size or bind brightness to non-`XF86` keys, edit the
+`Brightness keys` block in `~/.config/i3/config`.
 
 ---
 
@@ -187,10 +186,29 @@ sudo wg                       # tunnel status / handshakes
 
 ---
 
-## Network (NetworkManager)
+## Network (NetworkManager + polybar wlan/eth)
 
-`nm-applet` is the system-tray network indicator (right-click for menu).
-Started automatically by i3.
+NetworkManager is the connection manager. Three independent UIs all talk
+to the same daemon — pick whichever fits the moment:
+
+| UI                      | How                                       | When to use                       |
+|-------------------------|-------------------------------------------|-----------------------------------|
+| `nm-applet` (tray)      | Click the network icon in polybar's tray  | Quick connect to a known SSID     |
+| `nm-connection-editor`  | `Mod+Shift+w`                             | Editing creds, certs, VPN profiles |
+| `nmtui` (TUI)           | `Mod+n` (opens in alacritty)              | SSH session, no GUI, recovery     |
+| `nmcli` (CLI)           | Any shell                                 | Scripts, automation, one-liners   |
+
+The polybar `wlan` module on the right side of the bar shows signal
+strength + SSID. Click it for the same `nm-connection-editor`; right-click
+for `nmtui`; middle-click toggles the radio via `rfkill`. The `eth`
+module beside it lights up only when a wired link is active — a laptop
+running on wifi sees no "ethernet offline" pill cluttering the bar.
+
+| Keys                     | Action                                       |
+|--------------------------|----------------------------------------------|
+| `Mod+Shift+w`            | Open `nm-connection-editor` (full GUI)       |
+| `Mod+n`                  | Open `nmtui` in alacritty (TUI fallback)     |
+| `XF86WLAN` (Fn+F8 ThinkPad) | Toggle wifi radio (`rfkill toggle wifi`)  |
 
 CLI:
 ```bash
@@ -201,9 +219,91 @@ nmcli device wifi connect "SSID" password "secret"
 nmcli connection up <name>      # bring connection up
 nmcli connection down <name>
 nmcli networking off            # quick airplane-mode
+
+# Low-level wifi (iw): signal, bitrate, raw 802.11 detail
+iw dev                          # which wireless interfaces exist
+iw dev wlan0 link               # signal level, SSID, bitrate
+iw dev wlan0 scan | less        # raw scan results (BSSIDs, channels)
+iw dev wlan0 station dump       # peer association info
+
+# Radio kill-switch
+rfkill list                     # which radios exist + state
+rfkill block wifi               # disable; `unblock` re-enables
+rfkill toggle wifi              # what XF86WLAN runs
 ```
 
 For VPN, OpenVPN configs go in `/etc/NetworkManager/system-connections/`.
+
+---
+
+## Power management (TLP + acpi + thermald + powertop)
+
+The setup script enables a small power-management stack on physical
+laptops. Nothing to configure for typical use — defaults are tuned for
+battery life and thermal headroom. On VMs / desktops these are skipped.
+
+| Tool       | What it does                                        | Auto-enabled? |
+|------------|-----------------------------------------------------|---------------|
+| `tlp`      | Daemon: laptop power-saving (CPU, PCIe ASPM, USB autosuspend, wifi power-save, SATA ALPM). 20–40% idle-power win on a typical ThinkPad. | yes (physical) |
+| `thermald` | Intel-only thermal daemon — proactive throttle so the SoC doesn't hit emergency thermal trips. | yes (Intel + physical) |
+| `acpi`     | One-shot CLI: battery state, charge level, time remaining. Used by the polybar fallback and shell scripts. | n/a (binary) |
+| `powertop` | Diagnostic tool — `sudo powertop` shows what's keeping the CPU awake and where energy is going. Run on demand. | no (manual) |
+
+The polybar `battery` module to the right of the volume control shows
+charge level (Font Awesome battery glyph + percentage), with a charging
+animation when the AC adapter is plugged in. Glyph colour goes from green
+(>80%) → yellow → orange → red (<20%) so a low-battery state is hard to
+miss. Click for `xfce4-power-manager-settings` if installed, or `acpi -V`
+in a terminal.
+
+```bash
+# Status / quick checks
+tlp-stat -s                    # TLP version + mode (AC vs battery)
+tlp-stat -b                    # battery health, full-charge %, cycle count
+tlp-stat -p                    # active CPU governor + EPP
+tlp-stat -t                    # temperatures (CPU + drives)
+acpi -V                        # battery + thermal + AC summary
+acpi -b                        # battery only
+
+# Manual mode override (rare — TLP auto-detects AC)
+sudo tlp ac                    # force "AC" profile
+sudo tlp bat                   # force "battery" profile
+sudo tlp start                 # re-apply current profile
+
+# Diagnostic — what's wasting power right now?
+sudo powertop                  # interactive TUI
+sudo powertop --html=power.html --time=60   # 60-sec HTML report
+
+# Thermal — is the SoC throttling?
+systemctl status thermald
+journalctl -u thermald -n 50 --no-pager
+```
+
+To tune TLP, edit `/etc/tlp.conf` (the defaults file is
+`/usr/share/tlp/defaults.conf` — copy a section into `/etc/tlp.conf` to
+override). After editing: `sudo systemctl restart tlp`. Common tweaks:
+
+```ini
+# /etc/tlp.conf
+CPU_SCALING_GOVERNOR_ON_AC=performance         # responsiveness on AC
+CPU_SCALING_GOVERNOR_ON_BAT=powersave          # battery
+CPU_BOOST_ON_AC=1                              # turbo enabled on AC
+CPU_BOOST_ON_BAT=0                             # turbo disabled on battery
+WIFI_PWR_ON_BAT=on                             # wifi power-save on bat
+START_CHARGE_THRESH_BAT0=75                    # ThinkPad-specific:
+STOP_CHARGE_THRESH_BAT0=80                     # cap charging at 80%
+                                               # for long battery health
+```
+
+The charge-threshold settings need `tlp-rdw` (already installed) plus
+the `acpi-call` kernel module (DKMS) on most ThinkPads — run
+`sudo apt install acpi-call-dkms` if you want to use them.
+
+To **disable** TLP (e.g. switching to GNOME's `power-profiles-daemon`):
+```bash
+sudo systemctl disable --now tlp
+sudo apt install power-profiles-daemon       # mutually exclusive with TLP
+```
 
 ---
 
