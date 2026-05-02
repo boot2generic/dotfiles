@@ -24,7 +24,12 @@ set $purple   #9900ff
 set $mod Mod4
 
 # --- Font ---
-font pango:JetBrains Mono 10
+# JetBrainsMono *Nerd Font* (not the plain JetBrains Mono package) — the
+# Nerd-patched build adds Font Awesome / Material / DevIcons glyphs that
+# the per-app `title_format` rules below use to draw an icon next to each
+# window title.  Installed by setup_terminal_tools() (or the local
+# `terminal` phase) into ~/.local/share/fonts/NerdFonts/.
+font pango:JetBrainsMono Nerd Font 10
 
 # --- Gaps (built into i3 >= 4.22) ---
 gaps inner 5
@@ -36,8 +41,11 @@ default_border normal 2
 default_floating_border normal 2
 hide_edge_borders none
 
-# Title bar font — single line using the session font above
-title_align center
+# Title bar alignment — left-justify so the per-app coloured prefix
+# (set by `for_window … title_format "<span foreground='…'>|</span> %title"`
+# below) sits flush against the window's left edge and is always
+# visible regardless of how short the title is.
+title_align left
 
 # --- Mouse interaction ---
 # Hold $mod and drag with the mouse to move/resize windows:
@@ -293,6 +301,60 @@ for_window [class="lxappearance"]           floating enable, resize set 700 450
 for_window [window_role="pop-up"]           floating enable
 for_window [window_role="task_dialog"]      floating enable
 for_window [title="Preferences$"]          floating enable
+
+# ============================================================
+# Window titles — per-app indicator on the title bar
+# ============================================================
+# Each rule prefixes the window's title with a coloured `|` (left half
+# block, U+258C) that signals the application category at a glance:
+# green = terminal, yellow = file mgr, orange = browser, cyan = settings,
+# magenta = VPN/privacy, purple = editor.
+#
+# Why a block element instead of Nerd Font glyphs: i3's title bars run
+# through Pango, whose font-fallback sometimes fails to find PUA-range
+# Nerd Font codepoints even when the active font has them — the glyphs
+# silently render as blank or "tofu".  U+258C is in the basic Unicode
+# Block Elements range and renders correctly in every font we ship,
+# making the indicators robust across font/Pango versions.
+#
+# i3 applies the LAST matching `title_format` rule, so the catch-all is
+# FIRST and per-app overrides FOLLOW.  To find a window's class for a
+# new rule: run `xprop` and click the window — look for the second
+# string in `WM_CLASS(STRING)`.
+
+# Generic fallback — neutral grey bar so every window still gets a marker.
+for_window [class=".*"]                       title_format "<span foreground='#5555aa'>|</span> %title"
+
+# Terminals — green
+for_window [class="(?i)^Alacritty$"]          title_format "<span foreground='#00ff41'>|</span> %title"
+for_window [class="(?i)xterm|st-256color|kitty|wezterm"] title_format "<span foreground='#00ff41'>|</span> %title"
+
+# File managers — yellow
+for_window [class="(?i)thunar"]               title_format "<span foreground='#ffcc00'>|</span> %title"
+for_window [class="(?i)nautilus|nemo|pcmanfm|dolphin"]   title_format "<span foreground='#ffcc00'>|</span> %title"
+
+# Browsers — orange (regular) / magenta (privacy) / cyan (chromium-family)
+for_window [class="(?i)firefox-esr|^firefox$|navigator"] title_format "<span foreground='#ff6b35'>|</span> %title"
+for_window [class="(?i)mullvad-browser|tor[ -]browser"]  title_format "<span foreground='#ff00cc'>|</span> %title"
+for_window [class="(?i)chromium|google-chrome|brave-browser"] title_format "<span foreground='#00e5ff'>|</span> %title"
+
+# Editors / IDEs — purple
+for_window [class="(?i)code|^cursor$|VSCodium|jetbrains-.+"] title_format "<span foreground='#9900ff'>|</span> %title"
+
+# System / settings dialogs — cyan
+for_window [class="(?i)pavucontrol"]          title_format "<span foreground='#00e5ff'>|</span> %title"
+for_window [class="(?i)Nm-connection-editor"] title_format "<span foreground='#00e5ff'>|</span> %title"
+for_window [class="(?i)Arandr"]               title_format "<span foreground='#9900ff'>|</span> %title"
+for_window [class="(?i)lxappearance"]         title_format "<span foreground='#ff00cc'>|</span> %title"
+
+# VPN — magenta
+for_window [class="(?i)mullvad-vpn"]          title_format "<span foreground='#ff00cc'>|</span> %title"
+
+# Media — green
+for_window [class="(?i)mpv|^vlc$|spotify"]    title_format "<span foreground='#00ff41'>|</span> %title"
+
+# Image viewers — yellow
+for_window [class="(?i)feh|sxiv|^gwenview$|nsxiv"] title_format "<span foreground='#ffcc00'>|</span> %title"
 
 # ============================================================
 # Resize mode

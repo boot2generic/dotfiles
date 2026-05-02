@@ -1,0 +1,265 @@
+/* ============================================================
+ * GTK 3 — Cyberpunk Neon overlay
+ * Loaded automatically by GTK 3 (alongside the theme set in
+ * settings.ini = Adwaita-dark).  Targets file-manager-heavy widgets:
+ * Thunar, dialogs, popovers, header bars, tree views.
+ * ============================================================ */
+
+/* Cyberpunk Neon palette — same hex values used by i3 / polybar */
+@define-color cyber_bg       #0d0d1a;
+@define-color cyber_bg_dark  #080810;
+@define-color cyber_surface  #12121f;
+@define-color cyber_surface1 #1a1a2e;
+@define-color cyber_surface2 #16213e;
+@define-color cyber_text     #e2e2ff;
+@define-color cyber_subtext  #8888cc;
+@define-color cyber_overlay  #5555aa;
+@define-color cyber_cyan     #00e5ff;
+@define-color cyber_magenta  #ff00cc;
+@define-color cyber_green    #00ff41;
+@define-color cyber_yellow   #ffcc00;
+@define-color cyber_red      #ff0055;
+
+/* ── Base background ─────────────────────────────────────── */
+window, dialog, popover, .background, .titlebar {
+  background-color: @cyber_bg;
+  color: @cyber_text;
+}
+
+/* ── Header bar / menu bar — neon cyan accent line ───────── */
+headerbar, .titlebar, .menubar,
+window > box > headerbar {
+  background-color: @cyber_surface1;
+  background-image: none;
+  color: @cyber_text;
+  border-bottom: 1px solid @cyber_cyan;
+  box-shadow: 0 1px 2px rgba(0, 229, 255, 0.15);
+}
+
+headerbar .title, .titlebar .title {
+  color: @cyber_cyan;
+  font-weight: bold;
+}
+
+headerbar button, .titlebar button {
+  background-color: transparent;
+  color: @cyber_text;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+headerbar button:hover, .titlebar button:hover {
+  background-color: @cyber_surface2;
+  border-color: @cyber_cyan;
+  color: @cyber_cyan;
+}
+
+headerbar button:active, headerbar button:checked {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+}
+
+/* ── Sidebar (Thunar shortcuts panel) ────────────────────── */
+.sidebar, .sidebar treeview,
+placessidebar, placessidebar list,
+.thunar-shortcuts-pane, .thunar-tree-pane {
+  background-color: @cyber_bg_dark;
+  color: @cyber_subtext;
+  border-right: 1px solid @cyber_surface1;
+}
+
+.sidebar row:selected,
+placessidebar row:selected {
+  background-color: @cyber_surface1;
+  color: @cyber_cyan;
+}
+
+.sidebar row:hover,
+placessidebar row:hover {
+  background-color: @cyber_surface;
+  color: @cyber_text;
+}
+
+/* ── Tree view / file list (Thunar's main pane) ──────────── */
+treeview, treeview.view, .view, textview {
+  background-color: @cyber_bg;
+  color: @cyber_text;
+}
+
+treeview:selected, treeview.view:selected, .view:selected,
+.view text:selected {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+}
+
+treeview:hover, .view:hover {
+  background-color: @cyber_surface;
+}
+
+treeview header button {
+  background-color: @cyber_surface1;
+  color: @cyber_subtext;
+  border: none;
+  border-bottom: 1px solid @cyber_cyan;
+  border-right: 1px solid @cyber_surface2;
+}
+
+treeview header button:hover {
+  background-color: @cyber_surface2;
+  color: @cyber_cyan;
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+button {
+  background-color: @cyber_surface1;
+  background-image: none;
+  color: @cyber_text;
+  border: 1px solid @cyber_surface2;
+  border-radius: 3px;
+  padding: 4px 10px;
+}
+
+button:hover {
+  background-color: @cyber_surface2;
+  border-color: @cyber_cyan;
+  color: @cyber_cyan;
+}
+
+button:active, button:checked {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+  border-color: @cyber_cyan;
+}
+
+button.suggested-action {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+  border-color: @cyber_cyan;
+}
+
+button.destructive-action {
+  background-color: @cyber_red;
+  color: @cyber_text;
+  border-color: @cyber_red;
+}
+
+/* ── Entry / search box / address bar ────────────────────── */
+entry, .entry {
+  background-color: @cyber_surface;
+  color: @cyber_text;
+  border: 1px solid @cyber_surface2;
+  border-radius: 3px;
+  caret-color: @cyber_cyan;
+  padding: 3px 6px;
+}
+
+entry:focus, .entry:focus {
+  border-color: @cyber_cyan;
+  box-shadow: inset 0 0 0 1px @cyber_cyan;
+}
+
+entry selection, .entry selection {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+}
+
+/* ── Path bar / breadcrumbs ──────────────────────────────── */
+.linked > button, .path-bar button, .toolbar button {
+  background-color: @cyber_surface;
+  color: @cyber_text;
+  border-color: @cyber_overlay;
+}
+
+.linked > button:hover, .path-bar button:hover, .toolbar button:hover {
+  background-color: @cyber_surface1;
+  color: @cyber_cyan;
+  border-color: @cyber_cyan;
+}
+
+/* ── Scrollbar — thin, neon on hover ─────────────────────── */
+scrollbar { background-color: transparent; }
+
+scrollbar slider {
+  background-color: @cyber_overlay;
+  border-radius: 6px;
+  min-width: 6px;
+  min-height: 6px;
+  margin: 2px;
+}
+
+scrollbar slider:hover { background-color: @cyber_cyan; }
+scrollbar slider:active { background-color: @cyber_magenta; }
+
+/* ── Tooltips ────────────────────────────────────────────── */
+tooltip, tooltip.background {
+  background-color: @cyber_bg_dark;
+  color: @cyber_cyan;
+  border: 1px solid @cyber_cyan;
+  border-radius: 3px;
+}
+
+tooltip * { color: @cyber_cyan; }
+
+/* ── Progress bars ───────────────────────────────────────── */
+progressbar progress, levelbar block.filled {
+  background-color: @cyber_cyan;
+  background-image: none;
+}
+
+progressbar trough, levelbar trough {
+  background-color: @cyber_surface;
+}
+
+/* ── Status bar (bottom of Thunar) ───────────────────────── */
+statusbar {
+  background-color: @cyber_surface1;
+  color: @cyber_subtext;
+  border-top: 1px solid @cyber_overlay;
+}
+
+/* ── Menus / popovers ────────────────────────────────────── */
+menu, .menu, popover, popover.background {
+  background-color: @cyber_surface1;
+  color: @cyber_text;
+  border: 1px solid @cyber_overlay;
+  border-radius: 4px;
+}
+
+menuitem, .menu .menuitem, popover modelbutton {
+  background-color: transparent;
+  color: @cyber_text;
+}
+
+menuitem:hover, .menu .menuitem:hover, popover modelbutton:hover {
+  background-color: @cyber_cyan;
+  color: @cyber_bg_dark;
+}
+
+/* ── Disabled state ──────────────────────────────────────── */
+*:disabled, *:disabled label, *:backdrop:disabled {
+  color: @cyber_overlay;
+}
+
+/* ── Notebook (tabs) ─────────────────────────────────────── */
+notebook header.top, notebook header {
+  background-color: @cyber_surface1;
+  border-bottom: 1px solid @cyber_cyan;
+}
+
+notebook header tab {
+  background-color: transparent;
+  color: @cyber_subtext;
+  border: 1px solid transparent;
+  padding: 4px 12px;
+}
+
+notebook header tab:checked {
+  background-color: @cyber_bg;
+  color: @cyber_cyan;
+  border-color: @cyber_cyan @cyber_cyan transparent @cyber_cyan;
+}
+
+notebook header tab:hover { color: @cyber_text; }
+
+/* ── Dialog buttons row ──────────────────────────────────── */
+.dialog-action-area button { min-width: 90px; }
