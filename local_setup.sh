@@ -335,7 +335,7 @@ BASE_PACKAGES=(
   # default profile drops idle power 20-40% with no user config.
   # `acpi` gives a one-line battery summary used by polybar's fallback;
   # `powertop` is on-demand only (run `sudo powertop` to audit drains).
-  tlp tlp-rdw acpi powertop
+  tlp tlp-rdw acpi powertop btop
   # wmctrl + x11-utils (xprop / xwininfo / xdpyinfo) — kept around
   # as desktop-environment diagnostic tools.  An earlier revision of
   # config/conky/launch.sh used them for a keep-below daemon; that's
