@@ -1,0 +1,31 @@
+# ============================================================
+# LightDM GTK Greeter — Cyberpunk Neon
+#
+# This file is a TEMPLATE.  local_setup.sh and vm_automation.py
+# substitute the literal placeholder string (the four uppercase letters
+# H-O-M-E surrounded by `@` signs) with the invoking user's $HOME, then
+# install the result at:
+#   /etc/lightdm/lightdm-gtk-greeter.conf  (as root, mode 0644)
+# Do NOT deploy this file directly — the substituted form is what
+# lightdm-gtk-greeter actually reads.
+# ============================================================
+
+[greeter]
+# Background path is templated at deploy time so this file contains no
+# per-user path in the repo.
+background          = @HOME@/.config/wallpaper/wallpaper.png
+
+theme-name          = Adwaita-dark
+icon-theme-name     = Papirus-Dark
+cursor-theme-name   = Adwaita
+cursor-theme-size   = 24
+
+font-name           = JetBrains Mono 11
+
+hide-user-image     = false
+
+# Clock panel indicator
+indicators          = ~host;~spacer;~clock;~spacer;~session;~power
+clock-format        = %a %b %d  %H:%M
+
+position            = 50%,center

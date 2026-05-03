@@ -15,7 +15,9 @@ laptop or VM — running on Debian 12+. The model assumes:
 - Local processes running as the user are *not* fully trusted (browser
   exploits, malicious npm/pip packages, supply-chain attacks).
 - Network adversaries can MITM unencrypted traffic.
-- Disk encryption is configured at OS install time (out of scope here).
+- **Disk encryption (LUKS) is configured at OS install time.** See the
+  next section — this is a hard prerequisite for the laptop, not an
+  optional extra.
 - Multi-user shared boxes and servers are **not** the target — some
   defaults (broad sudo NOPASSWD during install) would be wrong there.
 
@@ -24,6 +26,40 @@ laptop or VM — running on Debian 12+. The model assumes:
 - Container/sandbox isolation (Firejail, bubblewrap, etc.).
 - USB device control / Yubikey enforcement.
 - Browser fingerprint resistance.
+
+---
+
+## Prerequisite: full-disk encryption (LUKS)
+
+**The laptop baseline is not safe without LUKS.** Several controls in
+this repo (zsh history hardening, narrow sudoers, Mullvad config
+permissions, WireGuard key-file modes) protect against malicious
+*processes* on a running system. None of them protect a *powered-off*
+or *suspended* machine from a thief who removes the disk and reads it
+on another box. On a laptop — which is the threat model that
+distinguishes a portable from a server — that is the dominant risk.
+
+These are not problems the dotfiles can fix; LUKS is an installer-time
+choice. To meet the threat model:
+
+- **At Debian install time**, choose "Guided — use entire disk and
+  set up encrypted LVM" (or the equivalent in the manual partitioner).
+  Pick a passphrase you can memorise; use a hardware token for the
+  recovery key if you have one.
+- **Do not configure auto-unlock** at boot via TPM unless you have
+  separately enabled measured boot — a TPM that releases the key to
+  any kernel boot does not protect against evil-maid attacks.
+- **Always lock the screen** before walking away (`Mod+Shift+x` or
+  `Mod+Delete` per these dotfiles). LUKS only protects you while the
+  machine is off; a logged-in unlocked session is fully exposed.
+- **Hibernate, don't suspend**, when leaving the laptop unattended for
+  long periods. Suspend keeps the LUKS key in RAM. (Hibernate has its
+  own caveats — the swap partition must be on the encrypted LVM.)
+
+The desktop workstation is generally a lower-risk environment
+(physically controlled, no transit), so LUKS there is a judgement
+call rather than a hard requirement — but the dotfiles' threat model
+otherwise still applies.
 
 ---
 
@@ -61,20 +97,34 @@ unharden first to give the install pipeline broad sudo:
 These apply unconditionally — no opt-in needed.
 
 ### `vm_automation.py` SSH credentials
-- **No hardcoded password.** `vmPass@124` was removed from the source.
-  The script tries SSH key auth first; only if `ssh -o BatchMode=yes …`
-  fails does it fall back to `sshpass -e` reading from `$VM_PASS`.
+- **No hardcoded password.** Earlier revisions of this repo embedded a
+  literal password constant; that has been removed. The script tries
+  SSH key auth first; only if `ssh -o BatchMode=yes …` fails does it
+  fall back to a 0600 password file (preferred) or the deprecated
+  `$VM_PASS` env var (with a warning).
 - **No `sshpass -p`.** The `-p <password>` form leaks credentials into
   every running process's argv (`ps -ef`). We use `sshpass -e` (env-var
-  mode) so the password lives only in the subprocess env block.
+  mode) so the password is read from `$SSHPASS` only inside the
+  subprocess env block.
+- **0600 password file preferred over `$VM_PASS`.** Env vars are
+  visible in `/proc/<pid>/environ` to the same UID and tend to leak
+  into shell history files and tmux scrollback. The script reads from
+  `$XDG_CONFIG_HOME/dotfiles/vm_pass` if present and refuses any mode
+  wider than 0600.
+- **`VM_HOST` is not committed to git.** The script requires
+  `VM_HOST=<ip-or-hostname>` in the environment — there is no default
+  IP in the source, so a stale checkout cannot accidentally target a
+  prior owner's VM.
 - **Pexpect logging is force-disabled.** `child.logfile = None` runs
   after every `_spawn_ssh()` so an accidental hook can't capture the
   bootstrap-time `su` password to disk.
 
-To eliminate `$VM_PASS` entirely:
+To eliminate the password file entirely once SSH key auth works:
 ```bash
-ssh-copy-id generic@172.22.220.59      # one-time
-unset VM_PASS                          # done
+export VM_HOST=<ip-or-hostname>
+ssh-copy-id "${VM_USER:-generic}@${VM_HOST}"
+shred -u ~/.config/dotfiles/vm_pass 2>/dev/null
+unset VM_PASS
 ```
 
 ### Mullvad keyring fingerprint pinning
@@ -149,16 +199,24 @@ edit the tag in `~/.config/nvim/init.lua` and `:Lazy sync`.
   every active connection's destination + bytes-transferred to any
   other local user.
 
-### Apt-source modifications back themselves up
-`enable_nonfree_repos` (called automatically when `--nvidia` is set)
-copies each modified file to `<path>.bak.YYYYMMDD-HHMMSS` (mode 0600)
-*before* the in-place edit. If `apt update` breaks afterwards,
-`mv …bak.* path` is the rollback.
+### Apt-source modifications are additive, not in-place (local_setup.sh)
+`local_setup.sh` enables non-free apt access by writing a deb822
+**drop-in** at `/etc/apt/sources.list.d/dotfiles-non-free.sources`.
+It never modifies `/etc/apt/sources.list` or
+`/etc/apt/sources.list.d/debian.sources` in place. To roll back, just
+delete the drop-in:
 
-Backups older than 30 days are auto-pruned at the start of each
-`enable_nonfree_repos` invocation — apt only reads `*.list` and
-`*.sources` files so the stale `.bak.YYYY*` entries are inert, but
-they accumulate without limit otherwise.
+```bash
+sudo rm /etc/apt/sources.list.d/dotfiles-non-free.sources
+sudo apt update
+```
+
+`vm_automation.py` is older and still uses an **in-place** edit for its
+`enable_nonfree_repos()` (legacy path; called automatically when
+`--nvidia` is set). It copies each modified file to
+`<path>.bak.YYYYMMDD-HHMMSS` (mode 0600) before the edit so
+`mv …bak.* path` is the rollback. Backups older than 30 days are
+auto-pruned at the start of each invocation.
 
 ### sudoers content never appears on a command line
 The `_install_sudoers` helper used to ship the new sudoers content as

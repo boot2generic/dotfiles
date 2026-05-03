@@ -290,10 +290,17 @@ CPU_SCALING_GOVERNOR_ON_BAT=powersave          # battery
 CPU_BOOST_ON_AC=1                              # turbo enabled on AC
 CPU_BOOST_ON_BAT=0                             # turbo disabled on battery
 WIFI_PWR_ON_BAT=on                             # wifi power-save on bat
-START_CHARGE_THRESH_BAT0=75                    # ThinkPad-specific:
+START_CHARGE_THRESH_BAT0=75                    # ThinkPad-specific (see note):
 STOP_CHARGE_THRESH_BAT0=80                     # cap charging at 80%
                                                # for long battery health
 ```
+
+**`BAT0` may be `BAT1` on your hardware.** Most ThinkPads expose the
+single internal cell as `BAT0`, but dual-battery models (X1 Carbon Gen
+* with the optional second cell, P-series with secondary, …) and some
+recent T-series revisions use `BAT1`. Check `ls /sys/class/power_supply/`
+and edit the `BAT*` suffix in the lines above to match. The polybar
+battery module auto-detects either name; the TLP keys do not.
 
 The charge-threshold settings need `tlp-rdw` (already installed) plus
 the `acpi-call` kernel module (DKMS) on most ThinkPads — run
@@ -321,15 +328,119 @@ trash semantics).
 ## Display manager (lightdm)
 
 Lightdm is what you log into from the boot screen. Themed in cyberpunk via
-`config/lightdm/lightdm-gtk-greeter.conf`. To customise the greeter:
+`config/lightdm/lightdm-gtk-greeter.conf.in` — a **template** with `@HOME@`
+placeholders for the user's home directory (e.g. background image path).
+At deploy time, both `local_setup.sh` and `vm_automation.py` substitute
+`@HOME@` with the actual `$HOME` (resolved on the target machine, no
+literal `/home/<user>` in the repo) and write the result to
+`/etc/lightdm/lightdm-gtk-greeter.conf`.
+
+To customise the greeter:
 
 ```bash
 sudo nvim /etc/lightdm/lightdm-gtk-greeter.conf
 sudo systemctl restart lightdm    # WARNING: kills your X session
 ```
 
-(Better: edit the file in `~/.../dotfiles/config/lightdm/`, redeploy with
-`local_setup.sh deploy`, then reboot.)
+(Better: edit the template `config/lightdm/lightdm-gtk-greeter.conf.in`
+in the dotfiles repo — keep the `@HOME@` placeholder anywhere a path
+that depends on the user's home would otherwise appear — then redeploy
+with `local_setup.sh deploy` and reboot.)
+
+---
+
+## NVIDIA GPU — gaming + workstation
+
+For a desktop with a discrete NVIDIA card, `local_setup.sh install` (when
+GPU is detected as `nvidia` and virt is `physical`) installs:
+
+- **Kernel module** — `nvidia-open-kernel-dkms` for Turing+ (RTX 20-series
+  / GTX 16-series and newer), or the legacy proprietary `nvidia-driver`
+  kernel module for Maxwell / Pascal / Volta. Selected automatically by
+  PCI device ID; fall-through to proprietary if the open package is
+  missing in apt's index.
+- **Native userland** — `nvidia-driver-libs`, `nvidia-settings`,
+  `firmware-misc-nonfree`, the Vulkan loader (`libvulkan1`), Vulkan
+  software-fallback drivers (`mesa-vulkan-drivers`), and diagnostics
+  (`vulkan-tools` — provides `vulkaninfo`, `vkcube`).
+- **32-bit gaming userland** — `nvidia-driver-libs:i386`, `libvulkan1:i386`,
+  `mesa-vulkan-drivers:i386`, `libgl1-mesa-dri:i386`. **Required for
+  Steam, Proton, Wine, DXVK/VKD3D, and any 32-bit Linux-native game.**
+  Installed only after `dpkg --add-architecture i386`, which the script
+  does for you.
+- **Hardware video decode** — `nvidia-vaapi-driver`. NVDEC → VA-API shim
+  so Firefox / Chromium / mpv hardware-decode H.264 / HEVC / AV1 on the
+  GPU instead of saturating the CPU. Cuts CPU usage on YouTube to 1-2%.
+- **Kernel cmdline** — `nvidia-drm.modeset=1` is appended to
+  `GRUB_CMDLINE_LINUX_DEFAULT` (with a timestamped backup of
+  `/etc/default/grub`). Required for Wayland, fixes most tearing on X11,
+  and fixes "blank screen on resume from suspend" on most cards.
+
+After `install` finishes, **reboot** before launching anything that
+talks to the GPU. The `validate` phase reports `[FAIL] nvidia kernel
+module not loaded (reboot required)` when this hasn't happened yet.
+
+### Verifying
+
+```bash
+nvidia-smi                     # driver + module loaded, GPU visible
+glxinfo | grep -i 'opengl renderer'   # should say NVIDIA, not llvmpipe
+vulkaninfo --summary | grep -i nvidia # Vulkan ICD wired up
+cat /proc/cmdline              # contains nvidia-drm.modeset=1
+```
+
+The validate phase covers most of these for you (kernel module
+loaded, `nvidia-smi` returns a GPU, `nvidia-drm.modeset=1` on the
+running cmdline, i386 multiarch enabled, `vulkaninfo` sees an NVIDIA
+device, 32-bit `libGL.so.1` present). It does **not** run `glxinfo`
+explicitly — run that one by hand if you want to confirm direct
+rendering at the GLX layer.
+
+```bash
+./local_setup.sh validate
+```
+
+### Optional add-ons (opt in at install time)
+
+- **CUDA toolkit** (~3 GB): for ML, Blender Cycles, DaVinci Resolve,
+  ffmpeg `-c:v h264_nvenc`, local LLM inference (llama.cpp, vLLM, etc.):
+  ```bash
+  ./local_setup.sh install --cuda
+  ```
+  Pulls `nvidia-cuda-toolkit` from non-free.
+
+- **Steam (Debian package)**: a thin bootstrap that downloads the real
+  Steam from Valve on first launch. Pulls in 32-bit deps automatically:
+  ```bash
+  ./local_setup.sh install --steam
+  ```
+  Or use the Flatpak Steam (`flatpak install flathub com.valvesoftware.Steam`)
+  if you prefer a sandboxed runtime — both work; pick one.
+
+- **Both at once**:
+  ```bash
+  ./local_setup.sh install --cuda --steam
+  ```
+
+### Troubleshooting
+
+- **`nvidia-smi: command not found`** — the metapackage didn't install.
+  Check `apt-get install nvidia-driver` worked and that non-free is
+  enabled (`grep -r non-free /etc/apt/sources.list.d/`). The installer
+  drops a `dotfiles-non-free.sources` deb822 file.
+- **Steam: "OpenGL GLX context is not using direct rendering"** —
+  i386 multiarch isn't on, or `nvidia-driver-libs:i386` is missing.
+  `dpkg --print-foreign-architectures` should list `i386`.
+- **Black screen after upgrade** — DKMS hasn't rebuilt against the new
+  kernel. Check `sudo dkms status`; rebuild with
+  `sudo dkms autoinstall` and reboot.
+- **Tearing on X11** — confirm `nvidia-drm.modeset=1` is on the running
+  cmdline (`cat /proc/cmdline`). Without it, the X driver falls back
+  to UMS.
+- **YouTube CPU usage still high** — `nvidia-vaapi-driver` needs the
+  `MOZ_DISABLE_RDD_SANDBOX=1` env var on Firefox, plus
+  `media.ffmpeg.vaapi.enabled = true` in `about:config`. Verify with
+  `vainfo` (install `vainfo` ad-hoc).
 
 ---
 

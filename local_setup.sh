@@ -9,16 +9,41 @@
 # releases. Other distros are rejected — they tend to be missing packages
 # (alacritty, fastfetch, hyperv-daemons) that the dotfiles assume.
 #
-# Auto-detects:
+# Auto-detects (PCI vendor IDs: 10de=NVIDIA, 1002=AMD, 8086=Intel):
+#   • CPU vendor    : intel | amd | other            (microcode pkg)
 #   • Virtualization : hyperv | vm (kvm/qemu/vmware/vbox/xen) | physical
 #   • GPU vendor    : nvidia | amd | intel | none
 # and installs the matching driver/agent stack:
-#   • nvidia   → nvidia-driver + nvidia-settings (enables non-free apt)
-#   • amd      → firmware-amd-graphics + libdrm-amdgpu1 + mesa-va-drivers
-#   • intel    → intel-media-va-driver-non-free + i965-va-driver
+#   • nvidia   → kernel module classified by PCI device ID:
+#                 ≥ 0x1E00 (Turing+/RTX 20+) → nvidia-open-kernel-dkms;
+#                 older silicon → proprietary `nvidia-driver`.  Falls
+#                 back to proprietary if the open package isn't in apt.
+#                 Always also: nvidia-driver-libs(:i386), libvulkan1
+#                 (+:i386), mesa-vulkan-drivers (+:i386),
+#                 libgl1-mesa-dri:i386, vulkan-tools, mesa-utils,
+#                 nvidia-vaapi-driver, firmware-misc-nonfree,
+#                 nvidia-settings.  i386 multiarch is enabled
+#                 automatically.  GRUB gets nvidia-drm.modeset=1
+#                 (with timestamped backup + update-grub +
+#                 update-initramfs).  Optional: `--cuda`
+#                 (nvidia-cuda-toolkit) and `--steam` (steam-installer).
+#   • amd      → firmware-amd-graphics, libdrm-amdgpu1, mesa-va-drivers,
+#                xserver-xorg-video-amdgpu, firmware-misc-nonfree,
+#                amd64-microcode
+#   • intel    → intel-media-va-driver  (the package was renamed from
+#                `-non-free` in trixie; bookworm still has the legacy
+#                name, but the script targets trixie+),
+#                i965-va-driver, xserver-xorg-video-intel,
+#                firmware-misc-nonfree, intel-microcode
 #   • hyperv   → hyperv-daemons + Hyper-V Xorg config (10-hyperv.conf)
 #   • vm       → qemu-guest-agent / open-vm-tools / virtualbox-guest-utils
 #                depending on the detected hypervisor
+#
+# Non-free apt access (physical + GPU only) is granted via a deb822
+# drop-in at /etc/apt/sources.list.d/dotfiles-non-free.sources — the
+# base /etc/apt/sources.list / debian.sources is never edited in place.
+# Removing the drop-in cleanly disables every component this script
+# added.
 #
 # Does NOT install xrdp.  Install it manually if you want to inspect the
 # desktop over RDP — `deploy` will pick up an existing xrdp install.
@@ -48,6 +73,13 @@
 #   --nvidia | --amd | --intel | --no-gpu
 #                                     Force GPU vendor
 #   --no-drivers                      Skip GPU driver install entirely
+#   --cuda                            (NVIDIA + physical) also install
+#                                     nvidia-cuda-toolkit (~3 GB).
+#                                     For ML/CUDA development workloads.
+#   --steam                           (NVIDIA + physical) also install
+#                                     steam-installer (Debian's Steam
+#                                     bootstrap).  Skip if you prefer
+#                                     Flatpak Steam.
 #
 
 set -euo pipefail
@@ -167,17 +199,59 @@ ensure_detection_tools() {
 }
 
 detect_gpu() {
-  # Inspect every PCI device whose class is VGA / 3D / Display and pick the
-  # first vendor we recognise.  Order matters: we prefer nvidia → amd →
-  # intel, since on a hybrid graphics laptop the discrete GPU is usually
-  # the one we want drivers for.
+  # Inspect every PCI device whose class is VGA / 3D / Display and pick
+  # the first vendor we recognise.  Order matters: we prefer
+  # nvidia → amd → intel, since on a hybrid graphics laptop the
+  # discrete GPU is usually the one we want drivers for.
+  #
+  # We match by VENDOR PCI ID (the 4-hex prefix in `[vendor:device]`),
+  # NOT by vendor *name*, because the previous text match ('amd|ati')
+  # falsely hit every line containing "compatible" — `lspci -nn` always
+  # prints "VGA compatible controller", which contains the substring
+  # "ati".  The vendor IDs are stable forever.
+  #
+  # Vendor IDs:  NVIDIA = 10de   AMD/ATI = 1002   Intel = 8086
   local pci
   pci="$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' || true)"
   GPU_RAW="$pci"
-  if   echo "$pci" | grep -qi nvidia;       then GPU_VENDOR="nvidia"
-  elif echo "$pci" | grep -Eqi 'amd|ati';   then GPU_VENDOR="amd"
-  elif echo "$pci" | grep -qi intel;        then GPU_VENDOR="intel"
-  else                                           GPU_VENDOR="none"
+  if   echo "$pci" | grep -qE '\[10de:'; then GPU_VENDOR="nvidia"
+  elif echo "$pci" | grep -qE '\[1002:'; then GPU_VENDOR="amd"
+  elif echo "$pci" | grep -qE '\[8086:'; then GPU_VENDOR="intel"
+  else                                        GPU_VENDOR="none"
+  fi
+}
+
+classify_nvidia_gen() {
+  # Map an NVIDIA GPU to "open" (Turing+) vs "proprietary" (Pascal-) by
+  # its PCI device ID, which detect_gpu() captured into $GPU_RAW via
+  # `lspci -nn`.  Format of a relevant line:
+  #
+  #   01:00.0 VGA compatible controller [0300]: NVIDIA Corporation
+  #     GA102 [GeForce RTX 3090] [10de:2204] (rev a1)
+  #
+  # We pull the four-hex-digit device id after `10de:` and compare it
+  # against 0x1E00.  Turing's first id is 0x1E02 (TU102); everything
+  # numerically >= 0x1E00 in NVIDIA's allocation is Turing or newer.
+  # Falls back to "proprietary" on any parse failure — strictly safer
+  # than installing the open module on a GPU it doesn't support.
+  local id_hex id_dec
+  # `|| true` swallows grep's exit-1 on no match — set -o pipefail
+  # would otherwise abort the whole script when this function is
+  # unexpectedly called on a non-NVIDIA GPU_RAW.
+  id_hex="$(echo "${GPU_RAW:-}" \
+              | grep -oE '\[10de:[0-9a-fA-F]{4}\]' \
+              | head -1 \
+              | tr -d '[]' \
+              | awk -F: '{print tolower($2)}' || true)"
+  if [[ -z "$id_hex" ]]; then
+    echo "proprietary"
+    return
+  fi
+  id_dec=$(printf '%d' "0x${id_hex}" 2>/dev/null || echo 0)
+  if (( id_dec >= 7680 )); then   # 0x1E00
+    echo "open"
+  else
+    echo "proprietary"
   fi
 }
 
@@ -280,6 +354,12 @@ BASE_PACKAGES=(
   bat grc net-tools lm-sensors conky-all iproute2
   # Detection helpers
   pciutils dmidecode
+  # Firmware updates via LVFS — `fwupdmgr refresh && fwupdmgr get-updates`
+  # surfaces vendor BIOS/EC updates on Lenovo / Dell / Framework / etc.
+  # Installing the package alone has no effect; it's the user's call
+  # whether to actually apply pending updates.  Tiny package, harmless
+  # in a VM.
+  fwupd
   # Archive tools — Mason needs `unzip` to extract clangd's release zip.
   # Without it, `:Mason` install of clangd silently fails with
   # "spawn: unzip … unzip is not executable".
@@ -287,11 +367,84 @@ BASE_PACKAGES=(
 )
 
 # Driver / agent packages by detected category
-NVIDIA_PACKAGES=(nvidia-driver nvidia-settings)
+#
+# Two Nvidia kernel-module paths:
+#   • "open"        — Turing (RTX 20-series, GTX 16-series) and newer.
+#                     Uses NVIDIA's open-source kernel module.  Required
+#                     for KMS + Wayland on modern setups; preferred on
+#                     X11 too.  Package: nvidia-open-kernel-dkms.
+#   • "proprietary" — Maxwell, Pascal, Volta and older.  The open
+#                     module does not support these GPUs at all.
+#                     Package: nvidia-driver (legacy closed module).
+# Generation is classified at install time by classify_nvidia_gen()
+# from the PCI device ID — no static array of GPU names to maintain.
+#
+# In addition, on physical NVIDIA boxes we install a gaming + workstation
+# userland (NVIDIA_PACKAGES_GAMING) — see comments on that array.
+NVIDIA_PACKAGES_OPEN=(nvidia-open-kernel-dkms nvidia-driver-libs nvidia-settings)
+NVIDIA_PACKAGES_PROP=(nvidia-driver nvidia-settings)
+
+# Gaming + workstation userland for NVIDIA on physical hardware.
+# Requires i386 multiarch (enable_i386_arch); driver_packages_for()
+# refuses to add this list otherwise so apt doesn't fail on :i386 deps.
+#
+# What each piece does:
+#   - nvidia-driver-libs:i386      32-bit libGL/libEGL/Vulkan ICD —
+#                                  REQUIRED for Steam, Proton, Wine,
+#                                  DXVK/VKD3D, and any 32-bit game.
+#   - libvulkan1 / libvulkan1:i386 native + 32-bit Vulkan loader.
+#   - mesa-vulkan-drivers          software Vulkan (lavapipe) — used as
+#   - mesa-vulkan-drivers:i386     a fallback by Vulkan loaders so that
+#                                  non-NVIDIA Vulkan-only apps don't
+#                                  fail to find ANY ICD.
+#   - vulkan-tools                 vulkaninfo / vkcube — diagnostics.
+#   - nvidia-vaapi-driver          NVDEC → VA-API shim.  Lets Firefox,
+#                                  Chromium, mpv hardware-decode H.264,
+#                                  HEVC, AV1 on the GPU instead of CPU.
+#                                  Cuts CPU usage on YouTube to 1-2%.
+#   - firmware-misc-nonfree        misc firmware (occasional NVIDIA
+#                                  microcode requires this).
+#   - libgl1-mesa-dri:i386         32-bit Mesa GL — DRI fallback for
+#                                  apps that bypass libGLX_nvidia.
+#
+# We deliberately do NOT install:
+#   - nvidia-cuda-toolkit          large; opt in with --cuda.
+#   - steam-installer              Debian's Steam launcher; opt in with
+#                                  --steam (you may prefer Flatpak).
+NVIDIA_PACKAGES_GAMING=(
+  nvidia-driver-libs:i386
+  libvulkan1 libvulkan1:i386
+  mesa-vulkan-drivers mesa-vulkan-drivers:i386
+  libgl1-mesa-dri:i386
+  vulkan-tools
+  mesa-utils                # glxinfo / glxgears for OpenGL diagnostics
+  nvidia-vaapi-driver
+  firmware-misc-nonfree
+)
+NVIDIA_PACKAGES_CUDA=(nvidia-cuda-toolkit)
+NVIDIA_PACKAGES_STEAM=(steam-installer)
 AMD_PACKAGES=(firmware-amd-graphics libdrm-amdgpu1 mesa-va-drivers
-              xserver-xorg-video-amdgpu)
-INTEL_PACKAGES=(intel-media-va-driver-non-free i965-va-driver
-                xserver-xorg-video-intel)
+              xserver-xorg-video-amdgpu firmware-misc-nonfree
+              amd64-microcode)
+# Intel (T14 iGPU and similar):
+#   • intel-media-va-driver  — VA-API driver for Gen8+ iGPUs (UHD/Iris
+#     Xe).  Was named `intel-media-va-driver-non-free` in Debian 12;
+#     renamed and moved to `main` in Debian 13.  Required for hardware
+#     video decode/encode in mpv, Firefox (with VA-API enabled), etc.
+#   • i965-va-driver         — Legacy Gen3-Gen7 iGPUs.  Cheap to add
+#                              and harmless on newer hardware.
+#   • xserver-xorg-video-intel — Xorg DDX driver.  Optional on modern
+#                              kernels (modesetting works), but having
+#                              it lets users opt in via Xorg.conf.
+#   • firmware-misc-nonfree  — Intel iGPU firmware blobs (needed for
+#                              full functionality on many SKUs).
+#                              Lives in non-free-firmware.
+#   • intel-microcode        — CPU microcode updates (Spectre/Meltdown
+#                              mitigations etc.).  Lives in
+#                              non-free-firmware.
+INTEL_PACKAGES=(intel-media-va-driver i965-va-driver
+                xserver-xorg-video-intel firmware-misc-nonfree
+                intel-microcode)
 HYPERV_PACKAGES=(hyperv-daemons)
 QEMU_PACKAGES=(qemu-guest-agent spice-vdagent xserver-xorg-video-qxl)
 VMWARE_PACKAGES=(open-vm-tools open-vm-tools-desktop xserver-xorg-video-vmware)
@@ -329,46 +482,88 @@ apt_install() {
   fi
 }
 
+enable_i386_arch() {
+  # Steam, Proton, Wine, and most older Linux-native games are 32-bit.
+  # On Debian, multiarch is opt-in: i386 packages are only resolvable
+  # after `dpkg --add-architecture i386` and a subsequent `apt update`.
+  # We do this BEFORE apt_update so the index already lists i386
+  # candidates by the time the gaming-userland install runs.
+  #
+  # Idempotent: dpkg --print-foreign-architectures lists what's already
+  # active, so we no-op on re-runs.
+  if dpkg --print-foreign-architectures 2>/dev/null \
+       | grep -qx 'i386'; then
+    ok "i386 multiarch already enabled"
+    return 0
+  fi
+  log "Adding i386 multiarch (Steam, 32-bit Vulkan/GL libs) …"
+  sudo dpkg --add-architecture i386 \
+    && ok "i386 architecture added (apt_update will refresh the index)" \
+    || { warn "dpkg --add-architecture i386 failed"; return 1; }
+}
+
 enable_nonfree() {
+  # Enable contrib + non-free + non-free-firmware as an additive
+  # deb822-format drop-in at /etc/apt/sources.list.d/dotfiles-non-free.sources.
   # Required for nvidia-driver and some firmware blobs.
   #
-  # SECURITY: every file we modify gets a timestamped backup
-  # (<path>.bak.YYYYMMDD-HHMMSS, mode 0600) BEFORE the in-place edit.
-  # apt source mods can wedge `apt update`; a one-liner rollback is
-  # always preferable to git-bisecting a config repo at 2 AM.
+  # Why a drop-in instead of editing /etc/apt/sources.list in place:
+  #   • Debian 13's installer can produce either legacy `.list` or modern
+  #     `.sources` (deb822) base files; the previous in-place sed only
+  #     handled both via two branches and was easy to break.
+  #   • A single drop-in is purely additive — apt reads sources.list AND
+  #     every *.sources file in sources.list.d/, so we never touch the
+  #     base config.  Removing the drop-in fully reverses the change.
+  #   • A typo can't wedge `apt update` for the base sources.
   #
-  # Auto-prune: delete backups older than 30 days so they don't
-  # accumulate forever.  Apt only reads *.list / *.sources so the
-  # *.bak.* files themselves are inert as far as apt is concerned.
+  # SECURITY: the drop-in is owned by root (via sudo install) and is the
+  # only file we add.  No backups required since we never modify any
+  # existing apt source; a partial failure leaves the system in its
+  # original state.  Auto-prune of old *.bak.* (created by the previous
+  # in-place edit) keeps things tidy after upgrade.
   sudo find /etc/apt -maxdepth 2 -name '*.bak.*' -mtime +30 -delete \
     2>/dev/null || true
 
-  local files=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list
-               /etc/apt/sources.list.d/*.sources)
-  log "Enabling non-free + non-free-firmware components …"
-  local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  for f in "${files[@]}"; do
-    [[ -f "$f" ]] || continue
-    local needs_edit=0
-    if [[ "$f" == *.list ]] && grep -qE '^deb ' "$f" \
-       && ! grep -qE 'non-free-firmware' "$f"; then
-      needs_edit=1
-    elif [[ "$f" == *.sources ]] && grep -qE '^Components:' "$f" \
-         && ! grep -qE 'non-free-firmware' "$f"; then
-      needs_edit=1
-    fi
-    if [[ "$needs_edit" == 1 ]]; then
-      sudo install -m 0600 "$f" "${f}.bak.${ts}"
-      if [[ "$f" == *.list ]]; then
-        sudo sed -i \
-          's/^\(deb .*main\)\(.*\)$/\1 contrib non-free non-free-firmware\2/' "$f"
-      else
-        sudo sed -i \
-          '/^Components:/ s/$/ contrib non-free non-free-firmware/' "$f"
-      fi
-      log "  edited ${f}  (backup: ${f}.bak.${ts})"
-    fi
-  done
+  local drop=/etc/apt/sources.list.d/dotfiles-non-free.sources
+  if [[ -f "$drop" ]] \
+     && grep -q 'non-free-firmware' "$drop" 2>/dev/null \
+     && grep -q 'non-free' "$drop" 2>/dev/null \
+     && grep -q 'contrib' "$drop" 2>/dev/null; then
+    ok "non-free drop-in already present at $drop"
+    return 0
+  fi
+
+  local codename
+  codename="${VERSION_CODENAME:-}"
+  if [[ -z "$codename" ]]; then
+    codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+  fi
+  if [[ -z "$codename" ]]; then
+    warn "could not determine Debian codename; refusing to write apt drop-in"
+    return 1
+  fi
+
+  log "Adding contrib/non-free/non-free-firmware drop-in: ${drop}"
+  sudo tee "$drop" >/dev/null <<EOF
+# Managed by local_setup.sh (enable_nonfree).
+# Adds contrib + non-free + non-free-firmware components additively, so
+# the base /etc/apt/sources.list (or /etc/apt/sources.list.d/debian.sources)
+# is never modified.  Remove this file to disable:
+#   sudo rm /etc/apt/sources.list.d/dotfiles-non-free.sources && sudo apt update
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${codename} ${codename}-updates
+Components: contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: ${codename}-security
+Components: contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+  sudo chmod 0644 "$drop"
+  ok "non-free drop-in installed at $drop"
 }
 
 driver_packages_for() {
@@ -376,7 +571,40 @@ driver_packages_for() {
   local pkgs=()
 
   case "$GPU_VENDOR" in
-    nvidia) pkgs+=("${NVIDIA_PACKAGES[@]}") ;;
+    nvidia)
+      local gen; gen="$(classify_nvidia_gen)"
+      # On Turing+ we want the open-kernel module, but the package name
+      # has churned across Debian releases.  If the apt index doesn't
+      # know `nvidia-open-kernel-dkms` (e.g. older release, alternate
+      # package naming, non-free not yet refreshed), silently fall back
+      # to the proprietary stack rather than crash the install.
+      if [[ "$gen" == "open" ]] \
+         && apt-cache show nvidia-open-kernel-dkms >/dev/null 2>&1; then
+        pkgs+=("${NVIDIA_PACKAGES_OPEN[@]}")
+      else
+        if [[ "$gen" == "open" ]]; then
+          warn "nvidia-open-kernel-dkms not in apt index — falling back to proprietary"
+        fi
+        pkgs+=("${NVIDIA_PACKAGES_PROP[@]}")
+      fi
+      # Gaming + workstation userland — only on physical hardware,
+      # only when i386 multiarch is actually enabled.  The :i386 deps
+      # would otherwise fail with "package not found".  In a VM the
+      # whole list is pointless (no GPU passthrough).
+      if [[ "$VIRT_TYPE" == "physical" ]] \
+         && dpkg --print-foreign-architectures 2>/dev/null \
+              | grep -qx 'i386'; then
+        pkgs+=("${NVIDIA_PACKAGES_GAMING[@]}")
+        if [[ "${WANT_CUDA:-0}" == "1" ]] \
+           && apt-cache show nvidia-cuda-toolkit >/dev/null 2>&1; then
+          pkgs+=("${NVIDIA_PACKAGES_CUDA[@]}")
+        fi
+        if [[ "${WANT_STEAM:-0}" == "1" ]] \
+           && apt-cache show steam-installer >/dev/null 2>&1; then
+          pkgs+=("${NVIDIA_PACKAGES_STEAM[@]}")
+        fi
+      fi
+      ;;
     amd)    pkgs+=("${AMD_PACKAGES[@]}") ;;
     intel)  pkgs+=("${INTEL_PACKAGES[@]}") ;;
   esac
@@ -401,15 +629,31 @@ driver_packages_for() {
   printf '%s\n' "${pkgs[@]}"
 }
 
-# Pinned fingerprint of Mullvad's apt-repo signing key.  See:
-#   https://mullvad.net/en/help/install-mullvad-app-linux
-# Override with $MULLVAD_KEY_FINGERPRINT if Mullvad rotates the key
-# (very rare — happens once every few years).
-# Mullvad's apt repo signing key (primary, 4096-bit RSA, created 2016).
-# Verified by inspecting `gpg --show-keys` against the live keyring on a
-# trusted host AND cross-checking with Mullvad's published page:
-#   https://mullvad.net/en/help/install-mullvad-app-linux
+# ============================================================
+# Mullvad apt-repo signing-key fingerprint pin
+# ============================================================
+# Source of truth for the current fingerprint:
+#     https://mullvad.net/en/help/install-mullvad-app-linux
+# Mullvad rotates this key only on a multi-year cadence — but when
+# they do, the install path here will fail loudly until the constant
+# below is updated to match the new published value.  That is the
+# correct security posture: pinning means we never silently accept a
+# replacement key, even one signed with the same email.
+#
+# If you see "Mullvad keyring failed pinning check" during install:
+#   1. Open the URL above in a browser on a trusted machine.
+#   2. Compare the published fingerprint with the one printed by the
+#      script (it shows BOTH the expected and the seen values).
+#   3. If the published value has changed, update this constant and
+#      commit.  If it has NOT changed, treat the mismatch as suspicious
+#      (CDN tampering, captive-portal interception) and retry on a
+#      different network before bypassing.
+#
+# Override at runtime — useful while testing a rotation before
+# committing the change to git:
+#     MULLVAD_KEY_FINGERPRINT=<new-fp> ./local_setup.sh install
 MULLVAD_KEY_FINGERPRINT="${MULLVAD_KEY_FINGERPRINT:-A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF}"
+MULLVAD_KEY_URL_DOC="https://mullvad.net/en/help/install-mullvad-app-linux"
 
 install_mullvad() {
   # Install Mullvad VPN from the official apt repo so `apt upgrade` keeps
@@ -459,12 +703,22 @@ install_mullvad() {
           ')"
   nkeys="$(printf '%s\n' "$fps" | grep -c .)"
   if [[ "$nkeys" -ne 1 ]] || [[ "$fps" != "$MULLVAD_KEY_FINGERPRINT" ]]; then
-    warn "Mullvad keyring failed pinning check:"
-    warn "  expected exactly 1 key with fingerprint $MULLVAD_KEY_FINGERPRINT"
-    warn "  saw $nkeys key(s):"
-    while IFS= read -r fp; do warn "    $fp"; done <<<"$fps"
-    warn "If Mullvad rotated their key, update MULLVAD_KEY_FINGERPRINT in"
-    warn "local_setup.sh (or set MULLVAD_KEY_FINGERPRINT=<new> in env)."
+    err "Mullvad keyring failed pinning check — refusing to install."
+    err "  expected exactly 1 primary key:"
+    err "      $MULLVAD_KEY_FINGERPRINT"
+    err "  found $nkeys primary key(s):"
+    while IFS= read -r fp; do err "      ${fp:-<empty>}"; done <<<"$fps"
+    err ""
+    err "What to do next:"
+    err "  1. Compare the expected fingerprint with the value Mullvad"
+    err "     publishes at:"
+    err "        ${MULLVAD_KEY_URL_DOC}"
+    err "  2. If Mullvad has rotated the key, update the pinned"
+    err "     MULLVAD_KEY_FINGERPRINT in local_setup.sh (or set the"
+    err "     env var MULLVAD_KEY_FINGERPRINT=<new-fp>) and re-run."
+    err "  3. If Mullvad has NOT rotated, treat the mismatch as a"
+    err "     compromise indicator: do not install, retry from a"
+    err "     different network, and consider reporting to Mullvad."
     sudo rm -f /etc/apt/keyrings/mullvad-keyring.asc
     return 1
   fi
@@ -489,10 +743,75 @@ install_mullvad() {
   fi
 }
 
+add_nvidia_modeset() {
+  # Append `nvidia-drm.modeset=1` to GRUB_CMDLINE_LINUX_DEFAULT in
+  # /etc/default/grub, then update-grub + update-initramfs.
+  #
+  # Why this matters:
+  #   • Required for Wayland on NVIDIA (DRM kernel mode setting).
+  #   • Strongly recommended on X11 too — fixes most tearing, eliminates
+  #     the "blank screen on resume from suspend" class of bugs, and
+  #     enables HW cursor planes.
+  #   • Without it, the X server falls back to UMS (User Mode Setting),
+  #     which is functional but visibly worse on physical hardware.
+  #
+  # Idempotent: skips work if the option is already present anywhere in
+  # the file (someone may have added it manually with a custom layout).
+  # Backup the original /etc/default/grub before editing so a botched
+  # update-grub on an exotic kernel doesn't leave the user without a
+  # known-good config to restore from.
+  local grub=/etc/default/grub
+  if [[ ! -f "$grub" ]]; then
+    warn "$grub not found — skipping nvidia-drm.modeset=1"
+    return 0
+  fi
+  if sudo grep -q 'nvidia-drm\.modeset=1' "$grub"; then
+    ok "nvidia-drm.modeset=1 already present in $grub"
+    return 0
+  fi
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  sudo install -m 0644 "$grub" "${grub}.bak.${ts}"
+  log "Adding nvidia-drm.modeset=1 to $grub (backup: ${grub}.bak.${ts})"
+  # Append inside the existing GRUB_CMDLINE_LINUX_DEFAULT="..." quotes.
+  # If it's empty (=""), this still produces ' nvidia-drm.modeset=1' —
+  # the leading space is harmless to the kernel cmdline parser.
+  sudo sed -i -E \
+    's/^(GRUB_CMDLINE_LINUX_DEFAULT=")([^"]*)"/\1\2 nvidia-drm.modeset=1"/' \
+    "$grub"
+  if ! sudo grep -q 'nvidia-drm\.modeset=1' "$grub"; then
+    warn "sed did not modify GRUB_CMDLINE_LINUX_DEFAULT in $grub — manual edit required"
+    return 1
+  fi
+  sudo update-grub >"${LOG_DIR}/update-grub.log" 2>&1 \
+    || warn "update-grub failed — see ${LOG_DIR}/update-grub.log"
+  sudo update-initramfs -u >"${LOG_DIR}/update-initramfs.log" 2>&1 \
+    || warn "update-initramfs failed — see ${LOG_DIR}/update-initramfs.log"
+  ok "nvidia-drm.modeset=1 added; reboot required to take effect"
+}
+
 install_phase() {
   ensure_sudo
-  if [[ "$GPU_VENDOR" == "nvidia" ]]; then
-    enable_nonfree
+  # Enable non-free / non-free-firmware on any physical machine.  All
+  # three GPU vendors benefit:
+  #   • NVIDIA   — nvidia-driver, nvidia-open-kernel-dkms (non-free)
+  #   • Intel    — firmware-misc-nonfree, intel-microcode (non-free-firmware)
+  #   • AMD      — firmware-misc-nonfree, amd64-microcode  (non-free-firmware)
+  # Most Debian 13 netinst installs already enable non-free-firmware
+  # automatically, but enable_nonfree() is idempotent so the no-op
+  # case is harmless.  VMs skip this — guest tools live in main.
+  #
+  # Hard-fail if enable_nonfree errors: silently continuing to the
+  # driver install would later fail with "Unable to locate package",
+  # producing a much more confusing error.
+  if [[ "$VIRT_TYPE" == "physical" && "$GPU_VENDOR" != "none" ]]; then
+    enable_nonfree || die "enable_nonfree failed — refusing to proceed"
+  fi
+  if [[ "$GPU_VENDOR" == "nvidia" && "$VIRT_TYPE" == "physical" ]]; then
+    # i386 must be enabled BEFORE apt_update so the package index
+    # picks up :i386 candidates in this same install run.  NVIDIA-
+    # only — Intel/AMD don't need 32-bit driver libs unless the user
+    # also wants Steam, which isn't on by default.
+    enable_i386_arch
   fi
   apt_update
   apt_install "base" "${BASE_PACKAGES[@]}"
@@ -514,20 +833,47 @@ install_phase() {
     log "No extra driver packages required for this hardware"
   fi
 
+  # Set nvidia-drm.modeset=1 only when we actually installed an NVIDIA
+  # driver on a physical box.  Pointless inside a VM (no real GPU to
+  # mode-set) and skipped on --no-drivers / --no-gpu since the kernel
+  # module won't be present.
+  if [[ "$GPU_VENDOR" == "nvidia" && "$VIRT_TYPE" == "physical" \
+        && "$NO_DRIVERS" != 1 ]]; then
+    add_nvidia_modeset
+  fi
+
   enable_power_services
 }
 
 enable_power_services() {
   # TLP — power-saving daemon.  Defaults are sane for laptops and give a
-  # 20-40% idle-power win on ThinkPads with no user tuning.  Conflicts
-  # with power-profiles-daemon, which we don't install.  Skipped inside
-  # VMs (no battery) and on hyperv (host owns power).
+  # 20-40% idle-power win on ThinkPads with no user tuning.  Skipped
+  # inside VMs (no battery) and on hyperv (host owns power).
+  #
+  # CONFLICT: power-profiles-daemon (PPD) and TLP both manage CPU
+  # frequency, platform profile, and battery thresholds — they MUST
+  # NOT run together.  GNOME 48 (the Debian 13 default desktop) pulls
+  # PPD in via task-gnome-desktop, so a fresh T14 install commonly has
+  # PPD installed even before we get here.  We purge it before enabling
+  # TLP so that whichever was running first doesn't fight us.  If the
+  # user prefers PPD's GNOME-integrated UX, they should skip the dotfile
+  # install on that machine — these dotfiles are opinionated about TLP.
   if [[ "$VIRT_TYPE" != "physical" ]]; then
     log "Skipping TLP enable — not a physical machine"
-  elif dpkg -l tlp 2>/dev/null | grep -q '^ii'; then
-    sudo systemctl enable --now tlp >/dev/null 2>&1 \
-      && ok "tlp enabled (power management active)" \
-      || warn "tlp enable failed — check \`systemctl status tlp\`"
+  else
+    if dpkg -l power-profiles-daemon 2>/dev/null | grep -q '^ii'; then
+      log "Removing power-profiles-daemon (conflicts with TLP) …"
+      sudo systemctl disable --now power-profiles-daemon \
+        >/dev/null 2>&1 || true
+      sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+        power-profiles-daemon >"${LOG_DIR}/apt_ppd_purge.log" 2>&1 \
+        || warn "power-profiles-daemon purge failed — see ${LOG_DIR}/apt_ppd_purge.log"
+    fi
+    if dpkg -l tlp 2>/dev/null | grep -q '^ii'; then
+      sudo systemctl enable --now tlp >/dev/null 2>&1 \
+        && ok "tlp enabled (power management active)" \
+        || warn "tlp enable failed — check \`systemctl status tlp\`"
+    fi
   fi
   # thermald — Intel-only; only present in apt graph when detect_cpu
   # said "intel" AND we're physical, so the dpkg gate is sufficient.
@@ -683,11 +1029,36 @@ deploy_phase() {
     sudo rm -f /etc/X11/xorg.conf.d/10-hyperv.conf 2>/dev/null || true
   fi
 
-  # LightDM greeter
-  local lightdm_src="${DOTFILES_DIR}/lightdm/lightdm-gtk-greeter.conf"
-  if [[ -f "$lightdm_src" ]]; then
-    sudo install -m 0644 "$lightdm_src" /etc/lightdm/lightdm-gtk-greeter.conf
-    ok "lightdm greeter config"
+  # LightDM greeter — template substitution.  The repo file is
+  # `lightdm-gtk-greeter.conf.in` with `@HOME@` placeholders so no
+  # per-user path lives in git.  We substitute and install in one step.
+  #
+  # Substitution is done in Python (`str.replace`) because every
+  # text-processing tool we tried first turned out to have a special-
+  # character footgun in its replacement string:
+  #   • sed s|x|y|g   — `&`, `\`, the delimiter all need escaping.
+  #   • awk gsub      — `&` means "the matched text", `\` is escape.
+  #   • bash ${//x/y} — bash 5.2 (Debian 13) added `&` backreferences
+  #                     to match `sed`/`awk` semantics.
+  # `str.replace` is pure substring replacement — no regex, no escapes,
+  # robust against any character $HOME might contain.  python3 is
+  # already on disk before deploy_phase runs (BASE_PACKAGES → python3-pil).
+  local lightdm_in="${DOTFILES_DIR}/lightdm/lightdm-gtk-greeter.conf.in"
+  if [[ -f "$lightdm_in" ]]; then
+    local lightdm_tmp
+    lightdm_tmp="$(mktemp)" || die "mktemp failed for lightdm template"
+    # shellcheck disable=SC2064  # capture $lightdm_tmp value, not name
+    trap "rm -f '$lightdm_tmp'" RETURN
+    HOME="$HOME" LIGHTDM_IN="$lightdm_in" python3 -c '
+import os, sys
+sys.stdout.write(
+    open(os.environ["LIGHTDM_IN"]).read()
+    .replace("@HOME@", os.environ["HOME"])
+)
+' > "$lightdm_tmp" \
+      || die "lightdm template substitution failed"
+    sudo install -m 0644 "$lightdm_tmp" /etc/lightdm/lightdm-gtk-greeter.conf
+    ok "lightdm greeter config (templated for ${HOME})"
   fi
 
   # If xrdp happens to be installed (manually), wire it up to ~/.xsession
@@ -711,6 +1082,20 @@ deploy_phase() {
 # Terminal stack: tpm / oh-my-zsh / starship / nerd font / shell
 # ============================================================
 install_nerd_font() {
+  # We deliberately install the *Nerd Font* JetBrainsMono variant from
+  # the upstream `ryanoasis/nerd-fonts` release rather than Debian's
+  # `fonts-jetbrains-mono` apt package.  They are NOT the same font:
+  #   • fonts-jetbrains-mono (apt, already in BASE_PACKAGES) is the
+  #     plain JetBrains Mono — used by lightdm, gtk theming, and any
+  #     fontconfig consumer that asks for "JetBrains Mono".
+  #   • The Nerd Font patched build adds Material/FontAwesome/DevIcons
+  #     glyphs in the Unicode Private Use Area.  i3 title bars,
+  #     polybar, alacritty, rofi all rely on those PUA glyphs to render
+  #     icons (battery indicator, vpn status, app prefixes …).  Without
+  #     this build, those slots render as tofu boxes.
+  # Debian does not ship the Nerd-patched build in any of its repos
+  # (bookworm, trixie, or experimental as of writing), so a manual
+  # download is the only path.  We make it tamper-evident below.
   if fc-list 2>/dev/null | grep -qi 'JetBrainsMonoNerd'; then
     ok "JetBrainsMono Nerd Font already installed"
     return 0
@@ -805,13 +1190,35 @@ install_starship() {
     ok "starship already installed"
     return 0
   fi
-  # SECURITY: don't pipe install.sh from starship.rs.  Instead pull the
-  # arch-specific tarball directly from the GitHub release, verify its
+
+  # PREFERRED PATH: install via apt.  Debian 13 (trixie) ships starship
+  # in main — using it removes the manual SHA-256 dance, places the
+  # binary under apt's upgrade path, and avoids a privileged write into
+  # /usr/local/bin/.  We check apt-cache first to avoid the noisy
+  # `Unable to locate package` failure on Debian 12 (bookworm), which
+  # does not ship starship in main.
+  if apt-cache show starship >/dev/null 2>&1; then
+    log "Installing starship from apt …"
+    if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+         --no-install-recommends starship \
+         >"${LOG_DIR}/apt_starship.log" 2>&1; then
+      ok "starship installed via apt"
+      return 0
+    else
+      tail -10 "${LOG_DIR}/apt_starship.log" || true
+      warn "apt install starship failed — falling back to tarball"
+    fi
+  else
+    log "starship not in apt (likely pre-trixie) — using tarball fallback"
+  fi
+
+  # FALLBACK PATH (Debian 12 / older / apt failure): pull the arch-
+  # specific tarball directly from the GitHub release, verify its
   # SHA256 against the published sidecar, and only then extract.  This
   # turns a "trust whatever HTTP returns" install into a tamper-evident
   # one — a compromised CDN can't ship a backdoored binary without also
-  # compromising the GitHub release.
-  log "Installing starship (verified SHA256) …"
+  # compromising the GitHub release.  We never pipe install.sh.
+  log "Installing starship from GitHub release (verified SHA256) …"
   mkdir -p "${HOME}/.local/bin"
   local arch tarball url tmp
   arch="$(uname -m)"
@@ -822,7 +1229,8 @@ install_starship() {
     *) warn "starship: unsupported arch '$arch'"; return 1 ;;
   esac
   url="https://github.com/starship/starship/releases/latest/download/${tarball}"
-  tmp="$(mktemp -d)"
+  tmp="$(mktemp -d)" || { warn "starship: mktemp -d failed"; return 1; }
+  # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
   if ! curl -fsSL "$url"            -o "$tmp/starship.tar.gz" \
     || ! curl -fsSL "${url}.sha256" -o "$tmp/starship.tar.gz.sha256"; then
@@ -980,6 +1388,7 @@ declare -a VAL_CHECKS=(
   "rfkill|command -v rfkill || test -x /usr/sbin/rfkill"
   "acpi|command -v acpi"
   "powertop|command -v powertop || test -x /usr/sbin/powertop"
+  "fwupd|command -v fwupdmgr || test -x /usr/bin/fwupdmgr"
 )
 
 # ============================================================
@@ -1080,7 +1489,11 @@ EOF
 
 _install_sudoers_file() {
   local content="$1" tmp
-  tmp="$(mktemp)"
+  # mktemp failure here is dangerous: a missing $tmp would cause `printf
+  # > $tmp` to fail with a confusing error AND leave /etc/sudoers.d/$USER
+  # in whatever state it was.  Hard-fail so the user notices.
+  tmp="$(mktemp)" || die "mktemp failed in _install_sudoers_file"
+  # shellcheck disable=SC2064
   trap "rm -f '$tmp'" RETURN
   printf '%s\n' "$content" > "$tmp"
   # Validate before installing — a broken sudoers file can permanently
@@ -1273,11 +1686,57 @@ validate_phase() {
     fi
   fi
   if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+    # nvidia-smi can succeed even when the kernel module isn't loaded
+    # (stale binary on PATH) — explicitly verify the module first so a
+    # post-install pre-reboot state is reported as "reboot required"
+    # rather than a misleading "ok".
+    if lsmod 2>/dev/null | grep -qE '^nvidia(_open)?\s'; then
+      printf "  [ ok ]  nvidia kernel module loaded\n"
+    else
+      printf "  [FAIL]  nvidia kernel module not loaded (reboot required)\n"
+      failures=$((failures + 1))
+    fi
     if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
       printf "  [ ok ]  nvidia-smi reports GPU\n"
     else
       printf "  [FAIL]  nvidia-smi (driver may need reboot)\n"
       failures=$((failures + 1))
+    fi
+    if grep -q 'nvidia-drm\.modeset=1' /proc/cmdline 2>/dev/null; then
+      printf "  [ ok ]  nvidia-drm.modeset=1 active on running kernel\n"
+    else
+      printf "  [FAIL]  nvidia-drm.modeset=1 not on cmdline (reboot required)\n"
+      failures=$((failures + 1))
+    fi
+    # Gaming/workstation userland — only checked on physical hosts
+    # where we'd actually have installed it.
+    if [[ "$VIRT_TYPE" == "physical" ]]; then
+      if dpkg --print-foreign-architectures 2>/dev/null | grep -qx 'i386'; then
+        printf "  [ ok ]  i386 multiarch enabled (Steam, Proton)\n"
+      else
+        printf "  [FAIL]  i386 multiarch missing (Steam/Proton won't run)\n"
+        failures=$((failures + 1))
+      fi
+      # vulkaninfo prints a NVIDIA "deviceName" line when the Vulkan
+      # ICD is wired up correctly.  Skip on a fresh post-install
+      # pre-reboot state — `vulkaninfo` may fail loudly there too.
+      if command -v vulkaninfo >/dev/null \
+         && vulkaninfo --summary 2>/dev/null | grep -qi 'nvidia'; then
+        printf "  [ ok ]  Vulkan reports NVIDIA device\n"
+      else
+        printf "  [FAIL]  vulkaninfo can't see the NVIDIA GPU (reboot? driver?)\n"
+        failures=$((failures + 1))
+      fi
+      # 32-bit GL — checks the file exists since we can't run a 32-bit
+      # process from a 64-bit script trivially.
+      if [[ -e /usr/lib/i386-linux-gnu/libGL.so.1 ]] \
+         || dpkg -l nvidia-driver-libs:i386 2>/dev/null \
+              | grep -q '^ii'; then
+        printf "  [ ok ]  32-bit GL libraries present\n"
+      else
+        printf "  [FAIL]  no 32-bit libGL — Steam will not start games\n"
+        failures=$((failures + 1))
+      fi
     fi
   fi
   # tlp + thermald only relevant on physical machines.  thermald layers
@@ -1346,15 +1805,24 @@ This stage will:
   • Run \`apt-get update\` to refresh the package index
   • Install ~80 desktop & terminal packages (i3, polybar, alacritty,
     neovim, zsh, picom, dunst, …)
-  • If GPU detected: install matching driver stack (nvidia/amd/intel)
+  • If GPU detected: install matching driver stack (nvidia/amd/intel).
+    For NVIDIA on physical hardware, additionally:
+      - Enable i386 multiarch (Steam, Proton, 32-bit games)
+      - Install 32-bit GL/Vulkan + native Vulkan + nvidia-vaapi-driver
+        (browser/mpv hardware video decode) + mesa-utils (glxinfo)
+      - Pick nvidia-open-kernel-dkms for Turing+, proprietary otherwise
+      - Append nvidia-drm.modeset=1 to the GRUB cmdline (reboot required)
+      - --cuda also installs nvidia-cuda-toolkit (~3 GB, opt-in)
+      - --steam also installs steam-installer (Debian's Steam bootstrap)
   • If virtualised: install hypervisor guest tools (qemu-guest-agent,
     open-vm-tools, hyperv-daemons, …)
   • Install Mullvad VPN from its official apt repo
   • Install WireGuard userland (wg, wg-quick)
   • Install power management: TLP + acpi + powertop
-    (thermald added on Intel hardware) — TLP enabled automatically
+    (thermald added on Intel hardware; power-profiles-daemon purged
+    if installed — it conflicts with TLP)
   • Install network helpers: iw, rfkill (NetworkManager already in base)
-  • Time: 3–10 minutes (depends on network)
+  • Time: 3–10 minutes (depends on network), longer with --cuda
 EOF
       ;;
     deploy)
@@ -1445,6 +1913,8 @@ ACTION="setup"
 FORCE_VIRT=""
 FORCE_GPU=""
 NO_DRIVERS=0
+WANT_CUDA=0
+WANT_STEAM=0
 # Default for `setup` is INTERACTIVE.  If stdin isn't a TTY (piped, SSH
 # without -t, CI), we silently flip to bypass — otherwise read would hang
 # the entire pipeline waiting for input that's never coming.
@@ -1464,6 +1934,8 @@ while [[ $# -gt 0 ]]; do
     --intel)    FORCE_GPU="intel" ;;
     --no-gpu)   FORCE_GPU="none" ;;
     --no-drivers) NO_DRIVERS=1 ;;
+    --cuda)       WANT_CUDA=1 ;;
+    --steam)      WANT_STEAM=1 ;;
     --interactive|-i)
       [[ "$_MODE_FLAG_SEEN" == "bypass" ]] \
         && die "--interactive and --bypass are mutually exclusive"

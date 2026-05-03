@@ -48,7 +48,7 @@ The script honours these env vars (set inline or in `.zshenv`):
 
 | Var              | Default                                                     | Effect |
 |------------------|-------------------------------------------------------------|---|
-| `WP_URL`         | the Unsplash image URL                                      | Use a different image |
+| `WP_URL`         | the Wallhaven image URL                                     | Use a different image |
 | `WP_SHA256`      | matches the default URL's bytes                             | Different expected hash |
 | `WP_SHA256_SKIP` | unset                                                       | `=1` to skip the hash check |
 | `WP_DEST`        | `~/.config/wallpaper/wallpaper.png`                         | Where to write |
@@ -60,7 +60,7 @@ WP_SHA256_SKIP=1 \
 ~/.config/wallpaper/download_wallpaper.sh
 ```
 
-If Unsplash ever re-encodes the source and our pinned SHA-256 stops
+If Wallhaven ever re-encodes the source and our pinned SHA-256 stops
 matching, the script aborts with a clear error pointing at the override.
 
 ---

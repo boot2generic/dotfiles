@@ -8,7 +8,8 @@ install sudo and grant NOPASSWD access.  All subsequent root operations use
 `sudo bash -c '...'` — no pexpect, no password prompts, no shell-injection
 risk from empty variable expansions.
 
-Default credentials come from env vars; fall back to provisioning defaults.
+Authentication priority is: SSH key → 0600 password file → deprecated
+$VM_PASS env var (see "Authentication" below).
 
 Requirements (controller): sshpass, openssh-client, rsync, python3-pexpect
 
@@ -32,7 +33,11 @@ Usage:
 Hardware flags (auto-detected when omitted):
     --hyperv    Hyper-V VM  : xrender picom, Hyper-V Xorg config (no RDP install)
     --physical  Real hardware: GLX picom
-    --nvidia    Install NVIDIA proprietary drivers (physical only)
+    --nvidia    Install NVIDIA proprietary drivers (physical only).
+                NOTE: this is the legacy single-package install path —
+                vm_automation.py does NOT yet implement the full driver
+                stack that local_setup.sh has on physical machines.  See
+                "Feature gap vs local_setup.sh" below.
 
 Mode flags (only meaningful for `setup`):
     --interactive | -i    Print a description of each stage and prompt
@@ -41,10 +46,21 @@ Mode flags (only meaningful for `setup`):
     --bypass | --yes | -y  Run end-to-end with no per-stage prompts.
                           Default when stdin is not a TTY (CI, piped).
 
-Authentication:
-    Set $VM_PASS env var, OR copy your SSH key with `ssh-copy-id`.
-    The script tries SSH key auth first; falls back to sshpass -e if
-    that fails.  There is NO hardcoded password fallback.
+Authentication (priority order):
+    1. SSH key auth — copy your key with `ssh-copy-id` (preferred).
+    2. Password file at $XDG_CONFIG_HOME/dotfiles/vm_pass (mode 0600).
+       Refused if mode is wider than 0600.  Recommended over env var.
+       Set up:
+           install -d -m 0700 ~/.config/dotfiles
+           umask 077 && printf '%s\n' '<password>' > ~/.config/dotfiles/vm_pass
+           chmod 600 ~/.config/dotfiles/vm_pass
+    3. $VM_PASS env var — DEPRECATED but still accepted with a stderr
+       warning.  Env vars leak via /proc/<pid>/environ, ps -ef, and
+       shell history.
+
+    VM_HOST is REQUIRED — export it as an env var (no default committed
+    to git):  export VM_HOST=<ip-or-hostname>  (VM_USER defaults to
+    'generic').  `--help` works without VM_HOST set.
 
 Note about `unharden`:
     `harden` narrows /etc/sudoers.d/<user> so arbitrary `sudo bash` no
@@ -57,6 +73,39 @@ RDP/xrdp is intentionally NOT installed by this script. If you want to verify
 visuals over RDP, install xrdp manually on the VM (`sudo apt install xrdp
 xorgxrdp`) and re-run `deploy-configs` — the script auto-detects an existing
 xrdp install and configures it.
+
+LightDM greeter:
+    The greeter theme is shipped as a TEMPLATE — `config/lightdm/
+    lightdm-gtk-greeter.conf.in` with `@HOME@` placeholders.  At deploy
+    time the controller substitutes the VM user's `$HOME` (resolved via
+    `$HOME` from an SSH login env, falling back to `getent passwd
+    <user> | cut -d: -f6`, then `/home/<user>`) and scp's the result to
+    the VM.  No `/home/<user>` literal is committed to git.
+
+Feature gap vs local_setup.sh:
+    vm_automation.py is the older of the two scripts and has NOT yet
+    been updated for full feature parity with local_setup.sh on
+    physical hardware.  Items that exist in local_setup.sh but NOT yet
+    here:
+      * GPU-vendor-specific Intel / AMD / NVIDIA driver bundles
+        (currently only the legacy `nvidia-driver` single-package
+        install).
+      * `--cuda` and `--steam` opt-in flags.
+      * deb822 drop-in (`/etc/apt/sources.list.d/dotfiles-non-free.sources`)
+        for non-free; `enable_nonfree_repos()` here still edits
+        `.list` / `.sources` files in place (with `.bak.<ts>` backups).
+      * NVIDIA open-kernel-dkms vs proprietary classification by PCI
+        device ID.
+      * `nvidia-drm.modeset=1` GRUB edit + initramfs rebuild.
+      * 32-bit gaming userland (i386 multiarch + :i386 driver libs).
+      * `power-profiles-daemon` purge before TLP install (they
+        conflict).
+      * `fwupd` *availability* check in the validate phase
+        (BASE_PACKAGES includes fwupd; the validate-phase entry has
+        not yet been added).
+    For physical-machine provisioning use `local_setup.sh` directly;
+    use `vm_automation.py` for VM provisioning where these don't apply
+    or are out of scope.
 """
 
 from __future__ import annotations
@@ -74,20 +123,131 @@ import pexpect
 # ============================================================
 # Connection settings  (override via environment variables)
 # ============================================================
-# Connection settings.  Priority for picking a password:
+# Priority for picking a password:
 #   1. SSH key auth — preferred.  If `ssh -o BatchMode=yes <user>@<host>
-#      true` succeeds, we never invoke sshpass at all.  This is the path
-#      to take for any production workflow: copy your key with
-#      `ssh-copy-id` and unset VM_PASS.
-#   2. $VM_PASS env var — used by sshpass -e (env-var mode), which keeps
-#      the password OUT of `ps -ef` output.  The earlier `sshpass -p` form
-#      exposed it on the command line — that is gone now.
-# There is intentionally no hardcoded password fallback.  If neither key
-# auth nor $VM_PASS is present, we error early instead of letting sshpass
-# silently prompt (which would hang non-interactive runs).
-VM_HOST = os.environ.get("VM_HOST", "172.22.223.157")
+#      true` succeeds, we never invoke sshpass at all.  This is the
+#      path to take for any production workflow: copy your key with
+#      `ssh-copy-id` and remove any password file.
+#   2. Password file — $XDG_CONFIG_HOME/dotfiles/vm_pass (or
+#      ~/.config/dotfiles/vm_pass), mode 0600.  We refuse to read it if
+#      the mode is wider than 0600, since a world-readable secret on
+#      disk is worse than no secret.  The file's contents are passed to
+#      `sshpass -e` via the SSHPASS environment variable so the
+#      password never appears on a command line.
+#   3. $VM_PASS env var — DEPRECATED.  Still accepted for backward
+#      compatibility, but emits a stderr warning because env vars are
+#      visible in /proc/<pid>/environ to the same UID and tend to leak
+#      into shell history files, tmux scrollback, and process listings.
+# There is intentionally no hardcoded password fallback.  If neither
+# key auth, the password file, nor $VM_PASS is present, we error early
+# instead of letting sshpass silently prompt (which would hang
+# non-interactive runs).
+#
+# VM_HOST has no default — it is required.  An IP committed to git is
+# personal information; the script fails loudly when unset rather than
+# silently targeting whatever default ships in the repo.  We don't
+# `sys.exit` at import time so `--help` still works without VM_HOST.
+VM_HOST = os.environ.get("VM_HOST")
 VM_USER = os.environ.get("VM_USER", "generic")
-VM_PASS = os.environ.get("VM_PASS")    # may be None — see _ssh_argv()
+
+
+def _require_vm_host() -> None:
+    """Hard-fail any action that needs to reach the VM if VM_HOST is unset."""
+    if not VM_HOST:
+        sys.exit(
+            "[!] VM_HOST is not set.  Export VM_HOST=<ip-or-hostname>\n"
+            "    in your environment (and optionally VM_USER — defaults\n"
+            "    to 'generic') before invoking this script.  Example:\n"
+            "        export VM_HOST=192.0.2.10 VM_USER=myuser\n"
+            "        python3 vm_automation.py verify"
+        )
+
+def _read_vm_pass_file() -> str | None:
+    """Read the VM password from a 0600 regular file under XDG_CONFIG_HOME.
+
+    Returns the trimmed password string, or None if no file exists.
+    Refuses (sys.exit) on:
+      • XDG_CONFIG_HOME set to a relative path  — XDG spec mandates absolute.
+      • File is a symlink                       — never trust an indirected
+                                                  path; the link's target
+                                                  permissions may not match
+                                                  the link's own metadata.
+      • Mode wider than 0600                    — fail-loud is better than
+                                                  silently using a world-
+                                                  readable secret.
+    Logs (but returns None) on:
+      • File exists but is empty                — likely a forgot-to-write
+                                                  state; warn and fall back
+                                                  to other auth.
+    """
+    cfg_home = os.environ.get("XDG_CONFIG_HOME") \
+        or os.path.expanduser("~/.config")
+    # XDG: relative XDG_CONFIG_HOME is invalid (must be absolute).  A
+    # relative env var would silently target $PWD/.config/dotfiles/vm_pass
+    # — surprising and wrong.  Reject explicitly.
+    if not os.path.isabs(cfg_home):
+        sys.exit(
+            f"[!] XDG_CONFIG_HOME={cfg_home!r} is not absolute.\n"
+            "    Per the XDG Base Directory spec it must be an absolute path.\n"
+            "    Either unset XDG_CONFIG_HOME or set it to an absolute path."
+        )
+    path = Path(cfg_home) / "dotfiles" / "vm_pass"
+    # is_file() follows symlinks; check is_symlink() FIRST so a symlink
+    # to a world-readable file (e.g. /etc/hostname) can't bypass the
+    # mode check below — `path.stat()` would read the target's perms,
+    # not the link's.
+    if path.is_symlink():
+        sys.exit(
+            f"[!] {path} is a symlink; refusing to read.\n"
+            "    Replace it with a regular 0600 file."
+        )
+    if not path.is_file():
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    # Permission bits beyond 0o600 (group/world read or write) reject.
+    if (st.st_mode & 0o077) != 0:
+        sys.exit(
+            f"[!] {path} has mode {oct(st.st_mode & 0o777)}; "
+            "must be 0600.\n"
+            f"    Fix with: chmod 600 {path}"
+        )
+    try:
+        content = path.read_text().strip()
+    except OSError as e:
+        print(f"[!] could not read {path}: {e}", file=sys.stderr)
+        return None
+    if not content:
+        # File exists but is empty — distinguish from "no file" so the
+        # user knows their well-intentioned-but-empty file isn't being
+        # silently honored.
+        print(
+            f"[!] {path} exists but is empty; ignoring.",
+            file=sys.stderr,
+        )
+        return None
+    return content
+
+
+_env_pass = os.environ.get("VM_PASS")
+_file_pass = _read_vm_pass_file()
+if _file_pass:
+    VM_PASS = _file_pass
+elif _env_pass:
+    print(
+        "[!] $VM_PASS is set — accepting for backward compatibility.\n"
+        "    DEPRECATED: env vars are visible in /proc/<pid>/environ and\n"
+        "    leak into shell history.  Move the password to a 0600 file:\n"
+        "        install -d -m 0700 ~/.config/dotfiles\n"
+        "        umask 077 && printf '%s\\n' \"$VM_PASS\" > ~/.config/dotfiles/vm_pass\n"
+        "        chmod 600 ~/.config/dotfiles/vm_pass && unset VM_PASS",
+        file=sys.stderr,
+    )
+    VM_PASS = _env_pass
+else:
+    VM_PASS = None    # may be None — see _ssh_argv()
 
 # SECURITY: VM_USER is interpolated into shell commands, ssh user@host
 # arguments, and `/etc/sudoers.d/<user>` paths.  Validate it matches
@@ -117,6 +277,12 @@ def _key_auth_works() -> bool:
     key is set up — that's the signal that we need to fall back to a
     password.  The result is cached for the rest of the process.
     """
+    # Defence-in-depth: main() calls _require_vm_host() before any action
+    # dispatch, so this should already be set.  But _key_auth_works can
+    # be called from helper paths (e.g. _ssh_argv() invoked by a future
+    # tool/test) before main() runs; guard so we get our clear error
+    # instead of `ssh user@None`.
+    _require_vm_host()
     global _ssh_key_works
     if _ssh_key_works is not None:
         return _ssh_key_works
@@ -543,6 +709,13 @@ BASE_PACKAGES = [
     # without it the Mason install of clangd silently fails with
     # "unzip is not executable".
     "unzip",
+
+    # Firmware updates via LVFS — `fwupdmgr refresh && fwupdmgr get-updates`
+    # surfaces vendor BIOS/EC updates on Lenovo / Dell / Framework / etc.
+    # Tiny package, harmless inside a VM (no firmware to update); kept in
+    # parity with local_setup.sh so VM and physical installs validate the
+    # same way.
+    "fwupd",
 ]
 
 NVIDIA_PACKAGES = [
@@ -874,6 +1047,16 @@ def _patch_picom_backend(is_hyperv: bool) -> None:
     backend     = "xrender" if is_hyperv else "glx"
     use_damage  = "false"   if is_hyperv else "true"
 
+    # Pre-flight: skip the patch if picom.conf wasn't deployed (e.g.,
+    # an earlier scp_to_vm failure in CONFIG_MAP).  Without this guard
+    # the remote python script would `open()` a non-existent file and
+    # raise FileNotFoundError, producing a redundant second error line
+    # for what is fundamentally the same problem.
+    rc, _ = run("test -f ~/.config/picom/picom.conf")
+    if rc != 0:
+        print("    [skip] picom backend patch — ~/.config/picom/picom.conf not present")
+        return
+
     # The remote python script gets exactly two free-form arguments, so
     # there's no chance of injection or quote-escaping bugs.
     remote_script = r'''
@@ -889,7 +1072,12 @@ with open(path, "w") as f: f.write(data)
         f"python3 -c {shlex.quote(remote_script)} "
         f"{shlex.quote(backend)} {shlex.quote(use_damage)}"
     )
-    run(cmd)
+    rc, out = run(cmd)
+    if rc != 0:
+        # Surface the failure so a botched picom config doesn't propagate
+        # silently through the rest of deploy_configs.  Caller signature
+        # returns None, so we just log here.
+        print(f"    [!] picom backend patch failed: {out.strip()[:200]}")
 
 
 def deploy_configs(is_hyperv: bool = True) -> int:
@@ -913,28 +1101,39 @@ def deploy_configs(is_hyperv: bool = True) -> int:
             print(f"    [!] Failed: {local_name}")
             errors += 1
 
-    # Single-file copies
+    # Single-file copies.  Each scp_to_vm return code is checked so we
+    # don't print "[ok]" on a silent failure (broken pipe, perms,
+    # network blip).  Failures bump `errors` and the caller can decide
+    # whether to abort.
+    def _copy_one(src: Path, dest: str, label: str,
+                  post_chmod: str | None = None) -> None:
+        nonlocal errors
+        rc = scp_to_vm(str(src), dest)
+        if rc != 0:
+            print(f"    [!] {label} → {dest}  (scp rc={rc})")
+            errors += 1
+            return
+        if post_chmod:
+            run(post_chmod)
+        print(f"    [ok] {label} → {dest}")
+
     gtk2_src = DOTFILES_DIR / "gtk-2.0" / "gtkrc"
     if gtk2_src.exists():
-        scp_to_vm(str(gtk2_src), "~/.gtkrc-2.0")
-        print("    [ok] gtk-2.0/gtkrc → ~/.gtkrc-2.0")
+        _copy_one(gtk2_src, "~/.gtkrc-2.0", "gtk-2.0/gtkrc")
 
     xsession_src = Path(__file__).parent / "scripts" / "xsession.sh"
     if xsession_src.exists():
-        scp_to_vm(str(xsession_src), "~/.xsession")
-        run("chmod +x ~/.xsession")
-        print("    [ok] xsession.sh → ~/.xsession")
+        _copy_one(xsession_src, "~/.xsession", "xsession.sh",
+                  post_chmod="chmod +x ~/.xsession")
 
     xresources_src = Path(__file__).parent / "scripts" / "Xresources"
     if xresources_src.exists():
-        scp_to_vm(str(xresources_src), "~/.Xresources")
-        print("    [ok] Xresources → ~/.Xresources")
+        _copy_one(xresources_src, "~/.Xresources", "Xresources")
 
     # Deploy .zshrc
     zshrc_src = DOTFILES_DIR / "zsh" / ".zshrc"
     if zshrc_src.exists():
-        scp_to_vm(str(zshrc_src), "~/.zshrc")
-        print("    [ok] .zshrc → ~/.zshrc")
+        _copy_one(zshrc_src, "~/.zshrc", ".zshrc")
 
     # Mark every shell helper executable.  rsync preserves perms when the
     # source is +x (which they are in the repo), but `scp` does NOT, so we
@@ -996,33 +1195,85 @@ def deploy_configs(is_hyperv: bool = True) -> int:
         xorg_src = DOTFILES_DIR / "xorg.conf.d" / "10-hyperv.conf"
         if xorg_src.exists():
             print("[*] Deploying Hyper-V Xorg config …")
-            scp_to_vm(str(xorg_src), "/tmp/10-hyperv.conf")
-            rc, out = run_root(
-                "mkdir -p /etc/X11/xorg.conf.d && "
-                "cp /tmp/10-hyperv.conf /etc/X11/xorg.conf.d/10-hyperv.conf"
-            )
-            if rc == 0:
-                print("    [ok] /etc/X11/xorg.conf.d/10-hyperv.conf")
-            else:
-                print(f"    [!] Xorg config: {out.strip()[:200]}")
+            scp_rc = scp_to_vm(str(xorg_src), "/tmp/10-hyperv.conf")
+            if scp_rc != 0:
+                print(f"    [!] scp Hyper-V Xorg config (rc={scp_rc})")
                 errors += 1
+            else:
+                rc, out = run_root(
+                    "mkdir -p /etc/X11/xorg.conf.d && "
+                    "cp /tmp/10-hyperv.conf /etc/X11/xorg.conf.d/10-hyperv.conf"
+                )
+                if rc == 0:
+                    print("    [ok] /etc/X11/xorg.conf.d/10-hyperv.conf")
+                else:
+                    print(f"    [!] Xorg config: {out.strip()[:200]}")
+                    errors += 1
     else:
         run_root("rm -f /etc/X11/xorg.conf.d/10-hyperv.conf 2>/dev/null || true")
         print("    [ok] Hyper-V Xorg config skipped (physical)")
 
-    # LightDM greeter
-    lightdm_src = DOTFILES_DIR / "lightdm" / "lightdm-gtk-greeter.conf"
-    if lightdm_src.exists():
+    # LightDM greeter — template substitution.  The repo file is
+    # `lightdm-gtk-greeter.conf.in` with `@HOME@` placeholders so no
+    # per-user path lives in git.  We render the template locally with
+    # awk, scp the rendered file, then `cp` it into /etc as root.
+    #
+    # awk -v passes $HOME as a variable rather than interpolating it
+    # into a regex replacement, so $HOME may contain `|`, `&`, `\` or
+    # any other character without breaking the substitution.
+    lightdm_in = DOTFILES_DIR / "lightdm" / "lightdm-gtk-greeter.conf.in"
+    if lightdm_in.exists():
         print("[*] Deploying LightDM greeter config …")
-        scp_to_vm(str(lightdm_src), "/tmp/lightdm-gtk-greeter.conf")
-        rc, out = run_root(
-            "cp /tmp/lightdm-gtk-greeter.conf /etc/lightdm/lightdm-gtk-greeter.conf"
-        )
-        if rc == 0:
-            print("    [ok] lightdm-gtk-greeter.conf deployed")
-        else:
-            print(f"    [!] lightdm config: {out.strip()[:200]}")
-            errors += 1
+        # Resolve the remote $HOME for VM_USER, since that's where the
+        # wallpaper.png will land after deploy_configs.  We can't trust
+        # the controller's $HOME — it's the controller user, not the VM.
+        # Order: $HOME from a login-ish shell → getent passwd → /home/<user>.
+        rc, vm_home = run("printf %s \"$HOME\"")
+        vm_home = vm_home.strip() if rc == 0 else ""
+        if not vm_home:
+            # Fall back to the password database, which works for users
+            # whose home isn't /home/<name> (e.g., /srv/users/alice,
+            # /var/lib/<svc>, root with /root).
+            rc2, getent_out = run(
+                f"getent passwd {shlex.quote(VM_USER)} | cut -d: -f6"
+            )
+            vm_home = getent_out.strip() if rc2 == 0 else ""
+        if not vm_home:
+            vm_home = f"/home/{VM_USER}"
+        # `rendered` MUST be initialised before the try, otherwise an
+        # exception inside `tempfile.NamedTemporaryFile(...)` (e.g. /tmp
+        # full on the controller) would leave it undefined and the
+        # `os.unlink(rendered)` in finally would raise TypeError, which
+        # the except clause does NOT catch — masking the real error.
+        rendered: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".conf", delete=False
+            ) as tf:
+                # Pure-Python string replace — no regex, immune to
+                # special characters in vm_home (`&`, `\`, `|`, etc.).
+                tf.write(lightdm_in.read_text().replace("@HOME@", vm_home))
+                rendered = tf.name
+            scp_rc = scp_to_vm(rendered, "/tmp/lightdm-gtk-greeter.conf")
+            if scp_rc != 0:
+                print(f"    [!] scp lightdm template (rc={scp_rc})")
+                errors += 1
+            else:
+                rc, out = run_root(
+                    "cp /tmp/lightdm-gtk-greeter.conf "
+                    "/etc/lightdm/lightdm-gtk-greeter.conf"
+                )
+                if rc == 0:
+                    print(f"    [ok] lightdm-gtk-greeter.conf deployed (HOME={vm_home})")
+                else:
+                    print(f"    [!] lightdm config: {out.strip()[:200]}")
+                    errors += 1
+        finally:
+            if rendered is not None:
+                try:
+                    os.unlink(rendered)
+                except OSError:
+                    pass
 
     # xrdp (only if installed)
     _, xrdp_check = run("dpkg -l xrdp 2>/dev/null | grep -q '^ii' && echo yes || echo no")
@@ -1591,14 +1842,21 @@ def harden_ufw() -> int:
 
 def unharden_ufw() -> int:
     print("[*] Disabling ufw …")
-    rc, _ = run_root(
+    rc, out = run_root(
         "if dpkg -l ufw 2>/dev/null | grep -q '^ii'; then "
         "/usr/sbin/ufw --force disable >/dev/null 2>&1 || true; "
         "fi",
         timeout=30,
     )
-    print("    [ok] ufw disabled")
-    return 0
+    # Earlier this function returned 0 unconditionally and always printed
+    # "[ok]" — so an SSH-side failure (broken control channel, sudoers
+    # narrowed against ufw, etc.) would leave the user thinking the
+    # firewall was off when it wasn't.  Match the harden_ufw error path.
+    if rc == 0:
+        print("    [ok] ufw disabled")
+    else:
+        print(f"    [!] ufw unharden failed: {out.strip()[-300:]}")
+    return rc
 
 
 def harden_uu() -> int:
@@ -1627,8 +1885,11 @@ def unharden_uu() -> int:
         "EOF\n"
         "systemctl disable --now unattended-upgrades.service >/dev/null 2>&1 || true"
     )
-    rc, _ = run_root(cmds, timeout=30)
-    print("    [ok] unattended-upgrades disabled")
+    rc, out = run_root(cmds, timeout=30)
+    if rc == 0:
+        print("    [ok] unattended-upgrades disabled")
+    else:
+        print(f"    [!] unattended-upgrades unharden failed: {out.strip()[-300:]}")
     return rc
 
 
@@ -1678,8 +1939,11 @@ def unharden_dns() -> int:
         "rm -f /etc/resolv.conf\n"
         "printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > /etc/resolv.conf\n"
     )
-    rc, _ = run_root(cmds, timeout=30)
-    print("    [ok] DNS reverted")
+    rc, out = run_root(cmds, timeout=30)
+    if rc == 0:
+        print("    [ok] DNS reverted")
+    else:
+        print(f"    [!] DNS unharden failed: {out.strip()[-300:]}")
     return rc
 
 
@@ -1758,8 +2022,13 @@ def take_screenshot(
             f"rm -f {remote}; DISPLAY={disp} scrot {remote} && echo SHOT_OK"
         )
         idx = child.expect(["SHOT_OK", pexpect.TIMEOUT], timeout=15)
-        child.expect(PROMPT_RE)
-        if idx != 0:
+        if idx == 0:
+            # Drain the prompt only when scrot actually produced output;
+            # on timeout there's likely no prompt to consume yet, and
+            # waiting for one would burn another ~30s before we can
+            # report the timeout to the user.
+            child.expect(PROMPT_RE)
+        else:
             print("[!] scrot timed out")
             child.sendline("cat /tmp/i3_xvfb.log 2>/dev/null"); child.expect(PROMPT_RE)
             print(child.before[-2000:])
@@ -1980,6 +2249,10 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print(__doc__)
         return 0
+
+    # Every action below talks to the VM, so this is the right place to
+    # enforce VM_HOST.  Doing it any earlier would block `--help`.
+    _require_vm_host()
 
     action = argv[1]
 

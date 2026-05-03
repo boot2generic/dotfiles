@@ -221,7 +221,7 @@ keymaps and options take effect on the next launch (or `:source %`).
 
 ## Further reading
 
-- [`/home/generic/.config/nvim/init.lua`](../config/nvim/init.lua) — every plugin and binding
+- [`~/.config/nvim/init.lua`](../config/nvim/init.lua) — every plugin and binding
 - [`:help lazy.nvim`](https://github.com/folke/lazy.nvim) — plugin manager docs
 - `:Telescope help_tags` — search nvim's built-in help
 - [LearnVim Cheatsheet](https://learnvim.irian.to/) — for new users

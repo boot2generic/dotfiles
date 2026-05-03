@@ -168,4 +168,4 @@ adding a `set -g @plugin '…'` line:
 
 - `man tmux`
 - [tmux wiki](https://github.com/tmux/tmux/wiki)
-- [`/home/generic/.config/tmux/tmux.conf`](../config/tmux/tmux.conf) — the canonical source
+- [`~/.config/tmux/tmux.conf`](../config/tmux/tmux.conf) — the canonical source

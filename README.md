@@ -33,33 +33,144 @@ git clone <this-repo> ~/dotfiles && cd ~/dotfiles
 ./local_setup.sh setup                # interactive — prompted before each stage
 ./local_setup.sh setup --bypass       # unattended — one sudo prompt, then everything
 ```
-Auto-detects `Debian 12+` / virt type / GPU vendor and installs the right
-driver stack (nvidia / amd / intel / hyperv / vm-guest tools). See
+Auto-detects `Debian 12+` / virt type / CPU vendor / GPU vendor (PCI
+vendor IDs `10de`/`1002`/`8086`) and installs the right driver stack
+(nvidia / amd / intel / hyperv / vm-guest tools), CPU microcode
+(`intel-microcode` / `amd64-microcode`), Vulkan + 32-bit gaming
+userland on NVIDIA + physical, and TLP / thermald / fwupd on physical.
+On physical machines with a GPU, non-free is enabled via an additive
+deb822 drop-in (`/etc/apt/sources.list.d/dotfiles-non-free.sources`) —
+the base apt sources are never edited in place. See
 [`readme/system.md`](readme/system.md) for what gets installed where.
+
+Optional NVIDIA add-ons (physical only):
+
+```bash
+./local_setup.sh setup --cuda             # adds nvidia-cuda-toolkit (~3 GB)
+./local_setup.sh setup --steam            # adds steam-installer (Debian's Steam bootstrap)
+./local_setup.sh setup --cuda --steam     # both
+```
 
 ### B) Provision a remote VM via SSH
 You're on a controller box and want to set up a separate Debian VM.
-```bash
-# One-time: install sudo + NOPASSWD on the VM (uses su for the bootstrap).
-VM_PASS=<password> python3 vm_automation.py bootstrap
+`VM_HOST` is required — there's no default committed to git.
 
-# Then prefer SSH key auth — avoids leaking the password to ps every call:
-ssh-copy-id generic@<vm-host>
-unset VM_PASS
+```bash
+export VM_HOST=<ip-or-hostname>           # required
+export VM_USER=<username>                 # optional (default: generic)
+
+# One-time: install sudo + NOPASSWD on the VM (uses su for the bootstrap).
+# Stash the bootstrap password in a 0600 file rather than $VM_PASS:
+install -d -m 0700 ~/.config/dotfiles
+umask 077 && printf '%s\n' '<password>' > ~/.config/dotfiles/vm_pass
+python3 vm_automation.py bootstrap
+
+# Then switch to SSH key auth — and remove the password file:
+ssh-copy-id "${VM_USER}@${VM_HOST}"
+shred -u ~/.config/dotfiles/vm_pass
 
 # Full end-to-end install — base packages + configs + terminal stack.
 python3 vm_automation.py setup [--hyperv|--physical] [--nvidia]   # interactive
 python3 vm_automation.py setup --bypass                           # unattended
 ```
-The script auto-detects whether SSH key auth works against `<host>`. If
-it does, `sshpass` is never invoked and `$VM_PASS` is ignored. If not,
-it falls back to `sshpass -e` (env-var mode — the password never lands
-in `ps -ef` output the way `sshpass -p` would).
 
-Override host/user with `VM_HOST` / `VM_USER` env vars. There is **no
-hardcoded password fallback** any more — set `$VM_PASS` or use keys.
+The script auto-detects whether SSH key auth works against `$VM_HOST`.
+If it does, `sshpass` is never invoked. Otherwise it falls back to the
+0600 password file (read into `$SSHPASS` for `sshpass -e`, never
+exposed on a command line). The legacy `$VM_PASS` env var still works
+for one-off use but emits a deprecation warning — env vars leak into
+`ps -ef`, `/proc/<pid>/environ`, and shell history.
+
+There is **no hardcoded password fallback** — configure key auth or
+the password file before running.
 
 Both scripts are idempotent — re-running fixes drift instead of reinstalling.
+
+#### `local_setup.sh` vs `vm_automation.py` — feature parity
+
+`vm_automation.py` is the older of the two scripts and is purpose-built
+for provisioning a remote Debian VM over SSH. It is **not** at full
+feature parity with `local_setup.sh` for physical-hardware install
+paths. Specifically, `vm_automation.py` does **not** yet implement:
+
+- GPU-vendor-specific driver bundles for Intel and AMD (the
+  `--nvidia` flag installs a legacy single-package `nvidia-driver`
+  only — no Vulkan / 32-bit / VA-API / open-kernel-dkms classification).
+- `--cuda` and `--steam` opt-in NVIDIA add-on flags.
+- deb822 drop-in for non-free — `enable_nonfree_repos()` in
+  `vm_automation.py` edits `.list` / `.sources` files **in place**
+  (with timestamped backups), not via an additive drop-in.
+- NVIDIA open-kernel-dkms vs proprietary classification by PCI device ID.
+- `nvidia-drm.modeset=1` GRUB edit + `update-initramfs` rebuild.
+- 32-bit gaming userland (`i386` multiarch + `:i386` driver libs).
+- `power-profiles-daemon` purge-before-TLP-install (they conflict).
+- `fwupd` *availability* check in the validate phase (`fwupd` is
+  installed via BASE_PACKAGES, but the validate phase has no entry
+  for it yet).
+
+Practical guidance: **on a physical laptop or desktop, run
+`local_setup.sh` directly.** Use `vm_automation.py` only when the
+target is a remote VM where most of those gaps don't apply (no GPU
+driver, no GRUB, no LVFS firmware updates).
+
+#### First-boot on a laptop (X11 vs Wayland)
+
+This stack is **X11-only by design** (i3 + picom + feh + i3lock).
+Debian 13's default desktop session — GNOME 48 — boots Wayland on
+capable hardware (most modern Intel and AMD iGPUs). After the install
+completes and `lightdm` starts:
+
+1. At the lightdm greeter, click the gear / session-picker icon.
+2. Select **`i3`** as the session.
+3. Log in. Lightdm remembers the choice for subsequent logins.
+
+If you want a Wayland-native stack on the laptop (sway, Hyprland, …),
+this repo does **not** configure it — that is a parallel project. Pick
+one path per machine; do not try to mix X11 i3 and a Wayland compositor
+on the same user account.
+
+#### First-boot hygiene (out of scope for the script, worth doing once)
+
+A few baseline tasks the script intentionally does not automate, but
+which belong in any "fresh install" routine:
+
+- **LUKS full-disk encryption.** Choose this in the Debian installer
+  for the laptop — see [`readme/security.md`](readme/security.md) for
+  why it's a hard prerequisite.
+- **Filesystem.** ext4 (Debian's default) is fine. If you want
+  pre-upgrade snapshots, install on `btrfs` with subvolumes and use
+  `snapper` / `timeshift`. This is an installer-time choice and isn't
+  reversible without reinstalling.
+- **Firmware updates.** ThinkPads (and most Lenovo / Dell desktops)
+  publish BIOS/EC updates via LVFS. `apt install fwupd` is in the base
+  set; refresh and review pending updates manually:
+  ```bash
+  sudo fwupdmgr refresh
+  sudo fwupdmgr get-updates
+  sudo fwupdmgr update     # only after reviewing
+  ```
+- **Display manager**. `local_setup.sh` enables `lightdm` and deploys
+  `~/.xsession`. If you swap to a different display manager (gdm,
+  sddm), the `~/.xsession` file is ignored — you'll need that DM's
+  equivalent of session selection.
+- **Wallpaper**. Deploy is non-hermetic for the wallpaper step: it
+  tries the SHA-pinned Unsplash download first, and only falls back to
+  the procedural Pillow generator when that fetch fails. Re-running
+  deploy on an offline machine gives a different image than running it
+  on a connected one.
+
+#### Personal config (git, ssh, gpg) is intentionally NOT in this repo
+
+These dotfiles configure the *desktop environment* only. Git
+`user.email`, signing keys, SSH config, and GPG agent settings are
+personal and live outside the repo — set them up out of band:
+
+```bash
+# Example git identity — adjust to taste
+git config --global user.name  "Your Name"
+git config --global user.email "you@example.com"
+git config --global init.defaultBranch main
+```
 
 ### Install modes
 
@@ -252,7 +363,7 @@ of the box. Desktops without those keys can use the `Mod+F-row` fallback.
 │   ├── conky/                 ← HW monitor
 │   ├── lockscreen/lock.sh     ← lockscreen renderer
 │   ├── wallpaper/             ← Pillow wallpaper generator
-│   ├── lightdm/               ← display-manager greeter theme
+│   ├── lightdm/               ← display-manager greeter theme (TEMPLATE: *.conf.in with @HOME@)
 │   ├── gtk-2.0/, gtk-3.0/     ← GTK theme overrides
 │   └── xorg.conf.d/           ← Hyper-V Xorg config
 └── scripts/
@@ -299,3 +410,7 @@ tool because each uses its own format. If you re-theme, search the repo for
 | `polybar battery shows wrong %` or missing    | Wrong `BAT0`/`ADP1` for this hardware — `ls /sys/class/power_supply/`, edit `[module/battery]` to match |
 | `iw / rfkill / tlp-stat: command not found`   | `/usr/sbin` not on PATH — re-source `~/.zshrc` (the dotfiles append it on login) |
 | `tlp inactive on a laptop`                    | `sudo systemctl enable --now tlp` — the install script enables it only on physical hardware |
+| `power-profiles-daemon active alongside TLP`  | Conflict: TLP install purges PPD on physical machines. If you re-installed PPD by hand, pick one — `sudo systemctl disable --now power-profiles-daemon` + `sudo apt purge power-profiles-daemon` to keep TLP. |
+| `nvidia kernel module not loaded` after install | Reboot — driver install adds `nvidia-drm.modeset=1` to GRUB and rebuilds initramfs but the new kernel only takes effect on the next boot. |
+| `Steam: not using direct rendering`           | i386 multiarch missing — `dpkg --print-foreign-architectures` should include `i386`. If not, re-run `./local_setup.sh install` (the script enables i386 on NVIDIA + physical). |
+| `validate phase reports fwupd FAIL`           | `sudo apt install fwupd` then re-run validate — fwupd is in BASE_PACKAGES so this only happens if a previous install was interrupted. |

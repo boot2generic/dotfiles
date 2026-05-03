@@ -19,6 +19,13 @@ dynamic_title = true
 history    = 10000
 multiplier = 3
 
+# Font.  Alacritty does NOT support `family` arrays, but fontconfig
+# resolves an unknown family by falling back to the system default
+# monospace.  We rely on that: if the Nerd Font isn't installed yet
+# (e.g. terminal_phase hasn't run), alacritty quietly uses the system
+# monospace and prompt icons render as tofu — annoying but not broken.
+# When the Nerd Font is installed (terminal_phase), its glyphs appear
+# automatically without a config edit.
 [font]
 normal      = { family = "JetBrainsMono Nerd Font", style = "Regular" }
 bold        = { family = "JetBrainsMono Nerd Font", style = "Bold" }

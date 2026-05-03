@@ -29,7 +29,13 @@ set $mod Mod4
 # the per-app `title_format` rules below use to draw an icon next to each
 # window title.  Installed by setup_terminal_tools() (or the local
 # `terminal` phase) into ~/.local/share/fonts/NerdFonts/.
-font pango:JetBrainsMono Nerd Font 10
+#
+# Pango accepts a comma-separated fallback list — i3 walks left-to-right
+# and uses the first family fontconfig can resolve.  This makes a fresh
+# install render with `JetBrains Mono` (apt: fonts-jetbrains-mono) before
+# terminal_phase runs, then automatically pick up the Nerd-patched build
+# once it's installed.  `monospace` is the universal last resort.
+font pango:JetBrainsMono Nerd Font, JetBrains Mono, DejaVu Sans Mono, monospace 10
 
 # --- Gaps (built into i3 >= 4.22) ---
 gaps inner 5
@@ -181,8 +187,20 @@ bindsym $mod+F10  exec --no-startup-id ~/.config/i3/scripts/media.sh next
 # balance between fine control and minimum keypresses to go from 0→100%.
 # `--exponent 4` would give finer control at the dim end if you want it
 # later — leaving linear default for now since it matches most desktops.
-bindsym XF86MonBrightnessUp   exec --no-startup-id brightnessctl set +5%
-bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+#
+# Guarded with a directory-listing test on /sys/class/backlight/ so the
+# same config works on a desktop (no backlight): on hardware without a
+# backlight device, brightnessctl exits non-zero silently — the guard
+# turns that into an explicit dunst notification instead of a confusing
+# dead key.  POSIX-portable test (no bash-only `compgen`).
+bindsym XF86MonBrightnessUp   exec --no-startup-id sh -c \
+    'if [ -n "$(ls -A /sys/class/backlight 2>/dev/null)" ]; then \
+       brightnessctl set +5%; \
+     else notify-send -t 1500 "Brightness" "no backlight on this hardware"; fi'
+bindsym XF86MonBrightnessDown exec --no-startup-id sh -c \
+    'if [ -n "$(ls -A /sys/class/backlight 2>/dev/null)" ]; then \
+       brightnessctl set 5%-; \
+     else notify-send -t 1500 "Brightness" "no backlight on this hardware"; fi'
 
 # ============================================================
 # Network keys

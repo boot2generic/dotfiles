@@ -26,17 +26,25 @@ mouse — i3lock will accept input immediately.)
 
 `lock.sh`:
 1. Looks up your wallpaper at `~/.config/wallpaper/wallpaper.png`.
-2. Creates an unguessable temp path with `mktemp --suffix=.png` and
+2. Resolves the screen geometry dynamically — `xdpyinfo` first,
+   `xrandr | awk '/^Screen 0/'` (the `current ...` field) second,
+   `1920x1080` fallback last. A degenerate `0x0` is rejected.  The
+   accent rectangle width is clamped to `min(700, screen_width)` so
+   it never overflows on small screens.
+3. Creates an unguessable temp path with `mktemp --suffix=.png` and
    chmods it 0600 (the predictable `/tmp/.lockscreen_<uid>.png` path
    it used to use was a multi-user race + read-confidentiality bug).
-3. Uses `convert` (ImageMagick) to:
+4. Uses `convert` (ImageMagick) to:
    - Tint it dark blue/cyan
    - Draw a thin cyan rule at y≈450
    - Render the time (HH:MM) in 130-pt JetBrainsMono Bold, centred
      slightly above middle, with a softer "shadow" copy behind it
    - Render the date in 28-pt Regular below the time
-4. Exec's `i3lock -i "$LOCK_IMG" --nofork`
-5. An `EXIT INT TERM` trap removes the temp file even if the script is
+5. Exec's `i3lock -i "$LOCK_IMG" --nofork`. **If `convert` fails for
+   any reason** (missing ImageMagick, font issue, etc.), the script
+   falls back to a plain `i3lock --color 080810` so you don't end up
+   with no lock at all.
+6. An `EXIT INT TERM` trap removes the temp file even if the script is
    killed mid-run.
 
 If no wallpaper is found, the script falls back to a generated gradient.

@@ -117,6 +117,10 @@ match, then re-run `~/.config/polybar/launch.sh`.
 - Colours come from the `[colors]` section at the top of the file. Change one
   there, every module that references `${colors.<name>}` updates.
 - Font is JetBrainsMono Nerd Font 10pt (covers icon glyphs natively).
+  `font-3` and `font-4` are plain `JetBrains Mono` and `DejaVu Sans Mono`
+  fallbacks so the bar still renders text on a fresh box where the Nerd
+  Font hasn't been installed yet — the icon glyphs fall back to boxes,
+  but no module disappears.
 - Bar height: change `height = 32` in `[bar/main]`.
 - Bar position: `top = true`. Set to `false` for a bottom bar.
 
