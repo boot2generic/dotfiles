@@ -1,0 +1,10 @@
+# direnv local state (don't commit; per-machine cache)
+.direnv/
+# nix flake registry (lock IS committed; this is a stray symlink)
+result
+result-*
+# venv (you don't need one inside `nix develop` — but keep this for
+# fallback when running outside the flake)
+.venv/
+__pycache__/
+*.pyc

@@ -80,6 +80,32 @@
 #                                     steam-installer (Debian's Steam
 #                                     bootstrap).  Skip if you prefer
 #                                     Flatpak Steam.
+#   --no-nix                          Skip the Nix package manager
+#                                     install.  Default is to install
+#                                     Nix in multi-user (daemon) mode +
+#                                     direnv + nix-direnv for per-
+#                                     project flake-based dev shells.
+#                                     Apt remains the system PM either
+#                                     way.
+#   --no-wifi-takeover                After all other phases finish,
+#                                     `setup` checks whether wifi is
+#                                     `unmanaged` (Debian installer
+#                                     parked it under ifupdown +
+#                                     wpa_supplicant) AND whether
+#                                     credentials are recoverable from
+#                                     /etc/network/interfaces.  If both,
+#                                     it runs scripts/take-over-wifi.sh
+#                                     to hand the device to NM so
+#                                     polybar's wlan pill works.
+#                                     The takeover pre-imports the SSID
+#                                     and PSK into NM BEFORE stopping
+#                                     wpa_supplicant, so the network
+#                                     reconnects automatically — no
+#                                     stranded sessions.  Pass this
+#                                     flag to skip that step (e.g. on
+#                                     a system where you've already
+#                                     done it manually, or where wifi
+#                                     creds live somewhere else).
 #
 
 set -euo pipefail
@@ -355,11 +381,27 @@ BASE_PACKAGES=(
   # Detection helpers
   pciutils dmidecode
   # Firmware updates via LVFS — `fwupdmgr refresh && fwupdmgr get-updates`
-  # surfaces vendor BIOS/EC updates on Lenovo / Dell / Framework / etc.
-  # Installing the package alone has no effect; it's the user's call
-  # whether to actually apply pending updates.  Tiny package, harmless
-  # in a VM.
+  # surfaces vendor BIOS/EC updates on Lenovo / Dell / Framework /
+  # Gigabyte / etc.  Installing the package alone has no effect; it's
+  # the user's call whether to actually apply pending updates.  Tiny
+  # package, harmless in a VM.
   fwupd
+  # Storage health monitoring.  Both packages are tiny and become
+  # essential the moment the user has more than one drive.
+  #   smartmontools — `smartctl -a /dev/sdX` reports SMART attributes
+  #                   (reallocated sectors, hours, wear leveling, ...)
+  #                   for SATA HDDs and SATA/NVMe SSDs.  Drop a cron or
+  #                   `smartd` config to email on disk decline.
+  #   nvme-cli      — `nvme list`, `nvme smart-log /dev/nvmeXn1`.  NVMe
+  #                   exposes more health stats than SATA SMART; this
+  #                   is the canonical client.
+  smartmontools nvme-cli
+  # direnv — auto-loads a per-directory environment when you `cd` into
+  # a project.  Paired with `nix-direnv` (installed by install_nix
+  # later) this turns `flake.nix` files into transparent dev shells:
+  # cd in → tools available; cd out → tools gone.  Tiny package; no
+  # effect until a `.envrc` exists in some directory.
+  direnv
   # Archive tools — Mason needs `unzip` to extract clangd's release zip.
   # Without it, `:Mason` install of clangd silently fails with
   # "spawn: unzip … unzip is not executable".
@@ -422,10 +464,15 @@ NVIDIA_PACKAGES_GAMING=(
   firmware-misc-nonfree
 )
 NVIDIA_PACKAGES_CUDA=(nvidia-cuda-toolkit)
-NVIDIA_PACKAGES_STEAM=(steam-installer)
+# steam-installer pulls in 32-bit deps automatically.  gamemode is the
+# Feral Interactive daemon that auto-tunes CPU governor + I/O priority
+# when a launched process calls into libgamemode (Steam Proton honors it
+# via the `gamemoderun %command%` launch wrapper) — meaningful FPS
+# uplift on Ryzen + Nvidia gaming setups, no-op when nothing's calling
+# in.  Bundling with --steam since both are gaming-tier packages.
+NVIDIA_PACKAGES_STEAM=(steam-installer gamemode)
 AMD_PACKAGES=(firmware-amd-graphics libdrm-amdgpu1 mesa-va-drivers
-              xserver-xorg-video-amdgpu firmware-misc-nonfree
-              amd64-microcode)
+              xserver-xorg-video-amdgpu firmware-misc-nonfree)
 # Intel (T14 iGPU and similar):
 #   • intel-media-va-driver  — VA-API driver for Gen8+ iGPUs (UHD/Iris
 #     Xe).  Was named `intel-media-va-driver-non-free` in Debian 12;
@@ -443,17 +490,26 @@ AMD_PACKAGES=(firmware-amd-graphics libdrm-amdgpu1 mesa-va-drivers
 #                              mitigations etc.).  Lives in
 #                              non-free-firmware.
 INTEL_PACKAGES=(intel-media-va-driver i965-va-driver
-                xserver-xorg-video-intel firmware-misc-nonfree
-                intel-microcode)
+                xserver-xorg-video-intel firmware-misc-nonfree)
 HYPERV_PACKAGES=(hyperv-daemons)
 QEMU_PACKAGES=(qemu-guest-agent spice-vdagent xserver-xorg-video-qxl)
 VMWARE_PACKAGES=(open-vm-tools open-vm-tools-desktop xserver-xorg-video-vmware)
 VBOX_PACKAGES=(virtualbox-guest-utils virtualbox-guest-x11)
 
-# Per-CPU-vendor extras.  thermald is Intel-only (it reads MSRs that
-# only exist on Intel CPUs).  On physical Intel hardware it provides
-# meaningful protection against thermal throttling spirals; in VMs the
-# MSRs aren't exposed so we skip it there too.
+# Per-CPU-vendor packages.  Two distinct concerns here:
+#
+#   1. CPU MICROCODE (security-critical, every physical machine).
+#      Installs Spectre/Meltdown mitigations + post-release CPU bug
+#      fixes (Zenbleed, Reptar, Downfall, etc.) loaded by the kernel
+#      at early boot.  Decoupled from GPU vendor — a Ryzen 3950x +
+#      RTX 3080 Ti box still needs amd64-microcode even though
+#      GPU_VENDOR=nvidia.  Lives in non-free-firmware.
+#
+#   2. Thermal/power daemons (Intel-only).  thermald reads MSRs that
+#      only exist on Intel CPUs; on AMD it's a no-op so we skip it.
+#      Pointless inside a VM (no hardware thermals exposed).
+INTEL_CPU_MICROCODE=(intel-microcode)
+AMD_CPU_MICROCODE=(amd64-microcode)
 INTEL_CPU_PACKAGES=(thermald)
 
 # ============================================================
@@ -619,6 +675,17 @@ driver_packages_for() {
       esac
       ;;
   esac
+
+  # CPU microcode — install on every physical machine, keyed only on
+  # CPU vendor.  This decouples it from GPU detection so e.g. a Ryzen
+  # box with an Nvidia GPU still gets amd64-microcode.  Both packages
+  # live in non-free-firmware, which enable_nonfree() turned on.
+  if [[ "$VIRT_TYPE" == "physical" ]]; then
+    case "$CPU_VENDOR" in
+      intel) pkgs+=("${INTEL_CPU_MICROCODE[@]}") ;;
+      amd)   pkgs+=("${AMD_CPU_MICROCODE[@]}") ;;
+    esac
+  fi
 
   # thermald only on physical Intel boxes — pointless inside a VM where
   # MSRs aren't exposed, and irrelevant on AMD where it doesn't run.
@@ -791,19 +858,22 @@ add_nvidia_modeset() {
 
 install_phase() {
   ensure_sudo
-  # Enable non-free / non-free-firmware on any physical machine.  All
-  # three GPU vendors benefit:
-  #   • NVIDIA   — nvidia-driver, nvidia-open-kernel-dkms (non-free)
-  #   • Intel    — firmware-misc-nonfree, intel-microcode (non-free-firmware)
-  #   • AMD      — firmware-misc-nonfree, amd64-microcode  (non-free-firmware)
-  # Most Debian 13 netinst installs already enable non-free-firmware
-  # automatically, but enable_nonfree() is idempotent so the no-op
-  # case is harmless.  VMs skip this — guest tools live in main.
+  # Enable non-free / non-free-firmware on any physical machine.
+  # Multiple consumers depend on it being on:
+  #   • NVIDIA      — nvidia-driver, nvidia-open-kernel-dkms (non-free)
+  #   • CPU intel   — intel-microcode (non-free-firmware)
+  #   • CPU amd     — amd64-microcode (non-free-firmware)
+  #   • All vendors — firmware-misc-nonfree (WiFi, BT, audio codecs,
+  #                   touchpads, etc.)
+  # We turn it on whenever VIRT=physical, regardless of GPU vendor —
+  # earlier this was gated to NVIDIA, which silently dropped microcode
+  # on AMD-CPU + Nvidia-GPU and Intel-CPU + AMD-GPU boxes.
+  # enable_nonfree() is idempotent, VMs skip — guest tools live in main.
   #
   # Hard-fail if enable_nonfree errors: silently continuing to the
   # driver install would later fail with "Unable to locate package",
   # producing a much more confusing error.
-  if [[ "$VIRT_TYPE" == "physical" && "$GPU_VENDOR" != "none" ]]; then
+  if [[ "$VIRT_TYPE" == "physical" ]]; then
     enable_nonfree || die "enable_nonfree failed — refusing to proceed"
   fi
   if [[ "$GPU_VENDOR" == "nvidia" && "$VIRT_TYPE" == "physical" ]]; then
@@ -843,6 +913,175 @@ install_phase() {
   fi
 
   enable_power_services
+  ensure_user_groups
+  trigger_backlight_udev
+  ensure_nm_managed
+}
+
+ensure_nm_managed() {
+  # Diagnose-only.  We do NOT auto-flip interfaces from `unmanaged` to
+  # NM-managed during install_phase: doing so kills any active wifi
+  # session that another backend (iwd / wpa_supplicant / ifupdown) was
+  # holding, which (a) instantly drops the network the install script
+  # itself is using, and (b) leaves NM with no saved profile to
+  # reconnect — net result is a brick until the user manually
+  # connects via nmcli.  We learned this the loud way once.
+  #
+  # Instead: print a clear diagnostic line per non-managed interface
+  # so the user can decide what to do (and when).  The recovery flow
+  # is documented in readme/system.md → "WiFi shows unmanaged".
+  if ! command -v nmcli >/dev/null 2>&1; then
+    return 0
+  fi
+  local devs
+  devs="$(nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null \
+            | awk -F: '$3 == "unmanaged" {print $1 ":" $2}' || true)"
+  if [[ -z "$devs" ]]; then
+    ok "NetworkManager: every device is managed"
+    return 0
+  fi
+  warn "NetworkManager has unmanaged interfaces:"
+  while IFS=: read -r dev typ; do
+    [[ -z "$dev" ]] && continue
+    warn "    $dev ($typ)  — currently driven by another backend"
+  done <<<"$devs"
+  warn "If your wifi/ethernet works as-is, leave it alone.  If you want"
+  warn "polybar's wlan pill to render and wifi-menu.sh to drive the"
+  warn "device, see readme/system.md → 'WiFi shows unmanaged' for the"
+  warn "manual takeover procedure (iwd-aware, won't drop your session)."
+}
+
+auto_wifi_takeover() {
+  # Run scripts/take-over-wifi.sh non-interactively at the end of
+  # `setup`, but ONLY when:
+  #   • wifi exists and is currently `unmanaged` (the bug we're fixing)
+  #   • SSID + PSK are recoverable from /etc/network/interfaces (so
+  #     the takeover script's pre-import step has something to import,
+  #     guaranteeing NM autoconnects after the backend swap and the
+  #     network is never lost)
+  #   • the user didn't pass --no-wifi-takeover
+  #   • we're not in a VM (no point — VMs have virtio-net, not wifi)
+  # If creds aren't extractable we deliberately do NOTHING and print
+  # a clear warning, because forcing a takeover without a saved profile
+  # is exactly the failure mode that bricked the user's session once
+  # already.  The user can then run the takeover manually after putting
+  # creds where the script can find them.
+  if [[ "${WANT_WIFI_TAKEOVER:-1}" != 1 ]]; then
+    log "Skipping wifi takeover (--no-wifi-takeover)"
+    return 0
+  fi
+  if [[ "$VIRT_TYPE" != "physical" ]]; then
+    return 0
+  fi
+  if ! command -v nmcli >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local wifi_iface state
+  wifi_iface="$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
+                | awk -F: '$2 == "wifi" {print $1; exit}' || true)"
+  [[ -z "$wifi_iface" ]] && return 0   # no wifi card — nothing to do
+
+  state="$(nmcli -t -f DEVICE,STATE device 2>/dev/null \
+           | awk -F: -v d="$wifi_iface" '$1==d {print $2; exit}' || true)"
+  if [[ "$state" != "unmanaged" && "$state" != "unavailable" ]]; then
+    log "wifi ($wifi_iface) is already managed by NM — no takeover needed"
+    return 0
+  fi
+
+  # Are credentials recoverable?  Anything missing → bail with a hint.
+  local has_creds=0
+  if [[ -r /etc/network/interfaces ]] \
+     && sudo grep -qE '^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+' \
+            /etc/network/interfaces 2>/dev/null; then
+    has_creds=1
+  fi
+  if (( has_creds == 0 )); then
+    warn "wifi ($wifi_iface) is unmanaged but credentials are not in"
+    warn "/etc/network/interfaces — refusing to auto-takeover (would"
+    warn "leave you offline with no profile to reconnect with)."
+    warn "If you want polybar's wlan pill to work, run:"
+    warn "    ${SCRIPT_DIR}/scripts/take-over-wifi.sh"
+    warn "after manually putting the SSID + PSK in a place the script"
+    warn "can read (or be ready to type them at its prompt)."
+    return 0
+  fi
+
+  local script="${SCRIPT_DIR}/scripts/take-over-wifi.sh"
+  if [[ ! -x "$script" ]]; then
+    warn "$script not found / not executable — skipping wifi takeover"
+    return 0
+  fi
+
+  log "Wifi is unmanaged + creds recoverable → running takeover non-interactively …"
+  # `--yes` skips the confirm prompt; the script's pre-import step
+  # imports the SSID/PSK from /etc/network/interfaces into NM first,
+  # so when wpa_supplicant stops and NM is restarted the network
+  # reconnects automatically (autoconnect=yes on the imported profile).
+  if "$script" --yes; then
+    ok "wifi takeover succeeded — polybar wlan pill should now render"
+  else
+    warn "wifi takeover failed — see ${script} output above"
+    warn "Wifi may have been left in a broken state.  Run the takeover"
+    warn "manually after diagnosing: ${SCRIPT_DIR}/scripts/diagnose-wifi.sh"
+  fi
+}
+
+trigger_backlight_udev() {
+  # `brightnessctl`'s Debian package ships
+  #   /lib/udev/rules.d/90-brightnessctl.rules
+  # which chgrp's /sys/class/backlight/*/brightness to `video` and
+  # adds g+w on the `add` event.  In normal operation the package
+  # postinst calls `udevadm trigger` so the rule fires immediately;
+  # in practice it sometimes doesn't (manual install, --no-triggers
+  # apt option, layered images where /sys was already populated, etc.)
+  # The symptom is: user is in `video`, brightnessctl runs without
+  # error, brightness doesn't change because the sysfs node is still
+  # root:root mode 644.  Re-triggering is idempotent and cheap.
+  [[ "$VIRT_TYPE" == "physical" ]] || return 0
+  command -v udevadm >/dev/null 2>&1 || return 0
+  [[ -d /sys/class/backlight ]] && \
+    [[ -n "$(ls -A /sys/class/backlight 2>/dev/null)" ]] || return 0
+  log "Re-triggering backlight udev rules …"
+  sudo udevadm control --reload-rules >/dev/null 2>&1 || true
+  sudo udevadm trigger --subsystem-match=backlight >/dev/null 2>&1 || true
+  ok "backlight udev rules reloaded"
+}
+
+ensure_user_groups() {
+  # Some hardware-control utilities require the invoking user to be in
+  # specific Unix groups so the kernel's udev rules can hand out write
+  # access to /sys and /dev nodes:
+  #   • video   — /sys/class/backlight/*/brightness (brightnessctl udev
+  #               rule chgrp's these to `video`).  Without it,
+  #               `brightnessctl set ±5%` silently no-ops on a laptop —
+  #               sysfs returns EACCES, brightnessctl prints to stderr,
+  #               but i3 doesn't surface that and the user sees "key
+  #               does nothing".  Debian only puts the FIRST install-time
+  #               user into `video`; users created with `useradd` later
+  #               are not added automatically.
+  # Skipped in VMs — no real backlight, no rule needed.
+  # Idempotent: usermod -aG is a no-op for an existing membership.
+  # Note: group membership only takes effect after the user re-logs in
+  # (more precisely, after a fresh login session is started).  We log a
+  # reminder when we changed anything.
+  [[ "$VIRT_TYPE" == "physical" ]] || return 0
+  local grp need_logout=0
+  for grp in video; do
+    if id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$grp"; then
+      ok "$USER is already in group: $grp"
+      continue
+    fi
+    if sudo usermod -aG "$grp" "$USER" 2>/dev/null; then
+      ok "added $USER to group: $grp"
+      need_logout=1
+    else
+      warn "failed to add $USER to group: $grp — brightness keys may no-op"
+    fi
+  done
+  if (( need_logout )); then
+    warn "group changes require a logout (or reboot) to take effect"
+  fi
 }
 
 enable_power_services() {
@@ -1309,6 +1548,146 @@ nvim_plugin_sync() {
   fi
 }
 
+install_nix() {
+  # Install the Nix package manager (daemon mode) on top of Debian and
+  # wire up direnv + nix-direnv for per-project flake-based dev shells.
+  #
+  # Coexists with apt — apt remains the system package manager.  The
+  # only "everyday" Nix command becomes `nix develop` (auto-activated
+  # by direnv when you cd into a project with a `flake.nix`).  See
+  # `templates/` for starter flakes and `readme/nix.md` for the model.
+  #
+  # Skip this step entirely with `./local_setup.sh setup --no-nix`.
+  if [[ "${WANT_NIX:-1}" != 1 ]]; then
+    log "Skipping Nix install (--no-nix)"
+    return 0
+  fi
+
+  # ── Detect a prior Nix install BEFORE deciding to run the installer.
+  #
+  # The previous version of this function only checked `command -v nix`.
+  # That misses a common case: Nix IS installed (full multi-user
+  # install — /nix/store, daemon unit, /etc/profile.d/nix.sh all
+  # present), but the in-flight `bash` running this script hasn't
+  # sourced /etc/profile.d/nix.sh yet, so `command -v nix` returns
+  # false.  Re-running the installer in that state hits the
+  # "backup-file-already-exists" guard and aborts the whole stage.
+  #
+  # We treat ANY of these as "Nix is here, don't curl|sh":
+  #   • `command -v nix`                                    (on PATH)
+  #   • /nix/var/nix/profiles/default/bin/nix              (canonical)
+  #   • /nix/store dir exists                              (store)
+  #   • /etc/profile.d/nix.sh exists                       (sourcing hook)
+  #   • the `nixbld` group exists                          (multi-user)
+  # If any are present, we source the profile script and skip ahead to
+  # configuring flakes + nix-direnv (idempotent re-runs of the rest).
+  local nix_present=0
+  if command -v nix >/dev/null 2>&1 \
+     || [[ -x /nix/var/nix/profiles/default/bin/nix ]] \
+     || [[ -d /nix/store ]] \
+     || [[ -f /etc/profile.d/nix.sh ]] \
+     || getent group nixbld >/dev/null 2>&1; then
+    nix_present=1
+  fi
+
+  if (( nix_present )); then
+    # Pull the daemon profile into THIS shell so subsequent `nix
+    # profile install` calls below work without forcing a logout.
+    if ! command -v nix >/dev/null 2>&1 && [[ -f /etc/profile.d/nix.sh ]]; then
+      # shellcheck disable=SC1091
+      . /etc/profile.d/nix.sh
+    fi
+    if command -v nix >/dev/null 2>&1; then
+      ok "Nix already installed ($(nix --version 2>/dev/null | head -1)) — skipping installer"
+    else
+      # Half-installed state: store/group exist but no runnable `nix`.
+      # We refuse to run the installer here because it would collide
+      # with the leftover backup files (see step 1 of readme/nix.md
+      # uninstall).  The user has to either fully uninstall first or
+      # fix their PATH.  We DO continue — the rest of the function
+      # (flakes config, direnv hook) is harmless without nix on PATH.
+      warn "Nix state on disk but \`nix\` not on PATH — partial install."
+      warn "  /nix/store : $([[ -d /nix/store ]]                    && echo yes || echo no)"
+      warn "  profile.d  : $([[ -f /etc/profile.d/nix.sh ]]         && echo yes || echo no)"
+      warn "  nixbld grp : $(getent group nixbld >/dev/null         && echo yes || echo no)"
+      warn "Skipping curl|sh installer (would trip its backup-file guard)."
+      warn "Open a new shell to test \`nix --version\`; if missing, see"
+      warn "readme/nix.md for full-uninstall instructions and re-run."
+    fi
+  else
+    log "Installing Nix (daemon mode) — Debian official installer …"
+    # SECURITY note on `curl | sh`: Nix's installer is the canonical
+    # exception to the no-curl-pipe rule.  Mitigations we apply:
+    #   • --proto '=https' --tlsv1.2 — refuse downgrades on the wire.
+    #   • Multi-user (daemon) install — Nix store is root-owned, so a
+    #     post-install compromise can't poison /nix/store without
+    #     root.
+    #   • TLS pinning to nixos.org via curl + system CA bundle.
+    # The canonical alternative (Determinate Systems installer) is
+    # also `curl | sh`; same security model.  Users who want stronger
+    # supply-chain assurance can verify the installer's signature
+    # manually before running this script.
+    if ! sh <(curl --proto '=https' --tlsv1.2 -sSfL \
+                   https://nixos.org/nix/install) \
+           --daemon --no-channel-add --yes \
+           >"${LOG_DIR}/nix_install.log" 2>&1; then
+      tail -30 "${LOG_DIR}/nix_install.log" || true
+      warn "Nix install failed — see ${LOG_DIR}/nix_install.log"
+      return 1
+    fi
+    ok "Nix daemon installed (multi-user mode)"
+    if [[ -f /etc/profile.d/nix.sh ]]; then
+      # shellcheck disable=SC1091
+      . /etc/profile.d/nix.sh
+    fi
+  fi
+
+  # Per-user nix.conf — enable flakes + the unified `nix` CLI.  Does
+  # not need root (system /etc/nix/nix.conf is left untouched).
+  install -d -m 0755 "${HOME}/.config/nix"
+  if ! grep -q 'experimental-features.*\(nix-command\|flakes\)' \
+         "${HOME}/.config/nix/nix.conf" 2>/dev/null; then
+    cat >> "${HOME}/.config/nix/nix.conf" <<'EOF'
+# Enable flakes + the unified `nix` CLI.  Both required for the
+# `nix develop` / `nix shell` / `nix run` workflow.
+experimental-features = nix-command flakes
+EOF
+    ok "flakes enabled in ~/.config/nix/nix.conf"
+  fi
+
+  # nix-direnv — fast cached `use flake` integration for direnv.
+  # Without it, `direnv reload` re-evaluates the flake from scratch
+  # every time you cd in (slow on Python+CUDA flakes).  Idempotent.
+  local nd_rc="${HOME}/.nix-profile/share/nix-direnv/direnvrc"
+  if [[ ! -f "$nd_rc" ]]; then
+    log "Installing nix-direnv via nix profile …"
+    if ! command -v nix >/dev/null 2>&1; then
+      warn "nix not on PATH — skipping nix-direnv (open a new shell and re-run)"
+    elif nix profile install nixpkgs#nix-direnv \
+           >"${LOG_DIR}/nix_direnv.log" 2>&1; then
+      ok "nix-direnv installed"
+    else
+      tail -20 "${LOG_DIR}/nix_direnv.log" || true
+      warn "nix-direnv install failed — see ${LOG_DIR}/nix_direnv.log"
+    fi
+  fi
+
+  # direnv glue: tell direnv to source nix-direnv's `use flake` impl.
+  install -d -m 0755 "${HOME}/.config/direnv"
+  if [[ -f "$nd_rc" ]] \
+     && ! grep -qF "$nd_rc" "${HOME}/.config/direnv/direnvrc" 2>/dev/null; then
+    echo "source $nd_rc" >> "${HOME}/.config/direnv/direnvrc"
+    ok "nix-direnv sourced from ~/.config/direnv/direnvrc"
+  fi
+
+  # Helpful hint: where the starter flakes live in this repo.
+  if [[ -d "${SCRIPT_DIR}/templates" ]]; then
+    log "Starter flakes available at ${SCRIPT_DIR}/templates/"
+    log "  cp -r ${SCRIPT_DIR}/templates/python /path/to/your/project/"
+    log "  cd /path/to/your/project/ && direnv allow"
+  fi
+}
+
 terminal_phase() {
   ensure_sudo
   log "Setting up terminal tools …"
@@ -1325,6 +1704,7 @@ terminal_phase() {
   sudo sensors-detect --auto >"${LOG_DIR}/sensors.log" 2>&1 || true
   ok "sensors-detect done"
   nvim_plugin_sync
+  install_nix
 }
 
 # ============================================================
@@ -1389,6 +1769,7 @@ declare -a VAL_CHECKS=(
   "acpi|command -v acpi"
   "powertop|command -v powertop || test -x /usr/sbin/powertop"
   "fwupd|command -v fwupdmgr || test -x /usr/bin/fwupdmgr"
+  "direnv|command -v direnv"
 )
 
 # ============================================================
@@ -1677,6 +2058,29 @@ validate_phase() {
     fi
   done
 
+  # Nix package manager — only validated when nix is actually present.
+  # If the user opted out with --no-nix during setup, nix isn't
+  # installed, and we silently skip these checks (no FAIL noise).
+  # Once nix IS present, we additionally verify nix-direnv + flakes
+  # are wired so a fresh-clone deploy behaves end-to-end.
+  if command -v nix >/dev/null 2>&1 \
+     || [[ -x /nix/var/nix/profiles/default/bin/nix ]]; then
+    printf "  [ ok ]  nix package manager installed\n"
+    if [[ -f "${HOME}/.nix-profile/share/nix-direnv/direnvrc" ]]; then
+      printf "  [ ok ]  nix-direnv hooked into direnv\n"
+    else
+      printf "  [FAIL]  nix-direnv missing (~/.nix-profile/share/nix-direnv/direnvrc)\n"
+      failures=$((failures + 1))
+    fi
+    if grep -q 'experimental-features.*\(nix-command\|flakes\)' \
+         "${HOME}/.config/nix/nix.conf" 2>/dev/null; then
+      printf "  [ ok ]  flakes enabled in ~/.config/nix/nix.conf\n"
+    else
+      printf "  [FAIL]  flakes not enabled in ~/.config/nix/nix.conf\n"
+      failures=$((failures + 1))
+    fi
+  fi
+
   # Hardware-conditional checks
   if [[ "$VIRT_TYPE" == "hyperv" ]]; then
     if [[ -f /etc/X11/xorg.conf.d/10-hyperv.conf ]]; then
@@ -1842,11 +2246,14 @@ EOF
 This stage will:
   • Download JetBrainsMono Nerd Font (~25 MB) → ~/.local/share/fonts/
   • Install oh-my-zsh + zsh-autosuggestions + zsh-syntax-highlighting
-  • Install starship prompt → ~/.local/bin/starship
+  • Install starship prompt (apt on trixie, tarball fallback on bookworm)
   • Install tpm (tmux plugin manager) and the listed tmux plugins
   • Set zsh as your default shell (via \`usermod -s\`)
   • Pre-install neovim plugins + treesitter parsers (headless)
-  • Time: 1–3 minutes
+  • Install Nix package manager (multi-user daemon) + nix-direnv for
+    per-project flake-based dev shells (apt stays the system PM).
+    Skip with --no-nix.
+  • Time: 1–3 minutes (4–6 with Nix install on first run)
 EOF
       ;;
     validate)
@@ -1856,6 +2263,15 @@ This stage will:
     enabled, default shell, fonts, VPN tools, polybar helpers
   • Read-only — no system changes
   • Time: < 5 seconds
+
+After validate, on physical machines with a wifi card stuck in
+NetworkManager state 'unmanaged' (caused by Debian's installer
+storing wifi creds in /etc/network/interfaces under ifupdown),
+\`setup\` runs scripts/take-over-wifi.sh non-interactively to hand
+the device to NM.  The takeover pre-imports the SSID + PSK into NM
+first so reconnection is automatic — no stranded sessions.  Skipped
+on \`--no-wifi-takeover\` and on systems where creds aren't in
+/etc/network/interfaces.
 EOF
       ;;
   esac
@@ -1915,6 +2331,8 @@ FORCE_GPU=""
 NO_DRIVERS=0
 WANT_CUDA=0
 WANT_STEAM=0
+WANT_NIX=1
+WANT_WIFI_TAKEOVER=1
 # Default for `setup` is INTERACTIVE.  If stdin isn't a TTY (piped, SSH
 # without -t, CI), we silently flip to bypass — otherwise read would hang
 # the entire pipeline waiting for input that's never coming.
@@ -1936,6 +2354,8 @@ while [[ $# -gt 0 ]]; do
     --no-drivers) NO_DRIVERS=1 ;;
     --cuda)       WANT_CUDA=1 ;;
     --steam)      WANT_STEAM=1 ;;
+    --no-nix)     WANT_NIX=0 ;;
+    --no-wifi-takeover) WANT_WIFI_TAKEOVER=0 ;;
     --interactive|-i)
       [[ "$_MODE_FLAG_SEEN" == "bypass" ]] \
         && die "--interactive and --bypass are mutually exclusive"
@@ -2002,6 +2422,13 @@ case "$ACTION" in
     # validate is read-only; failures shouldn't abort the pipeline (it's
     # the LAST stage anyway, so just report and move on).
     run_stage 4 4 validate validate_phase || true
+
+    # Auto-wifi-takeover runs AFTER all four stages — by this point all
+    # apt downloads, git clones, oh-my-zsh fetch, nvim plugin sync, etc.
+    # are done, so a brief network reconfiguration is safe.  Skipped
+    # unless wifi is `unmanaged` AND creds are recoverable.  See
+    # auto_wifi_takeover() for the safety conditions.
+    auto_wifi_takeover || true
 
     echo
     ok "Local setup complete."

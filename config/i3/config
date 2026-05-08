@@ -188,19 +188,14 @@ bindsym $mod+F10  exec --no-startup-id ~/.config/i3/scripts/media.sh next
 # `--exponent 4` would give finer control at the dim end if you want it
 # later — leaving linear default for now since it matches most desktops.
 #
-# Guarded with a directory-listing test on /sys/class/backlight/ so the
-# same config works on a desktop (no backlight): on hardware without a
-# backlight device, brightnessctl exits non-zero silently — the guard
-# turns that into an explicit dunst notification instead of a confusing
-# dead key.  POSIX-portable test (no bash-only `compgen`).
-bindsym XF86MonBrightnessUp   exec --no-startup-id sh -c \
-    'if [ -n "$(ls -A /sys/class/backlight 2>/dev/null)" ]; then \
-       brightnessctl set +5%; \
-     else notify-send -t 1500 "Brightness" "no backlight on this hardware"; fi'
-bindsym XF86MonBrightnessDown exec --no-startup-id sh -c \
-    'if [ -n "$(ls -A /sys/class/backlight 2>/dev/null)" ]; then \
-       brightnessctl set 5%-; \
-     else notify-send -t 1500 "Brightness" "no backlight on this hardware"; fi'
+# Guarded against hardware without a backlight (the desktop case): the
+# helper script checks /sys/class/backlight/ and emits a dunst toast
+# instead of silently no-opping.  Wrapping the same logic inline with
+# `sh -c '...'` doesn't work — i3's command parser doesn't recognise
+# single-quoted strings as a quoting form, so the inline `[` confuses
+# its tokenizer (Expected one of these tokens: ... '[').
+bindsym XF86MonBrightnessUp   exec --no-startup-id ~/.config/i3/scripts/brightness.sh up
+bindsym XF86MonBrightnessDown exec --no-startup-id ~/.config/i3/scripts/brightness.sh down
 
 # ============================================================
 # Network keys

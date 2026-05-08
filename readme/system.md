@@ -234,6 +234,91 @@ rfkill toggle wifi              # what XF86WLAN runs
 
 For VPN, OpenVPN configs go in `/etc/NetworkManager/system-connections/`.
 
+### WiFi shows "unmanaged" — manual NM takeover
+
+Symptom: `nmcli device status` reports `wlp...:wifi:unmanaged`, the
+polybar wlan pill shows "off" forever, `wifi-menu.sh` opens but
+neither lists nor connects to networks. Cause: another backend (most
+commonly **iwd** on Intel cards, sometimes wpa_supplicant launched
+from `/etc/network/interfaces`, occasionally systemd-networkd) is
+holding the device. Debian's NetworkManager defers to those by default
+via `[ifupdown] managed=false`.
+
+**Do not blindly force NM to take over while you're online over wifi**
+— flipping the device to `managed` instantly drops the active
+connection, and NM has no saved profile to reconnect with. The install
+script will fail mid-flight. Plug ethernet in first, or be ready to
+type your SSID + password into nmtui.
+
+**Easy path:** the dotfiles ship a guarded takeover script that does
+all the steps below in the right order, with a confirmation prompt:
+
+```bash
+~/dotfiles/scripts/take-over-wifi.sh        # interactive
+~/dotfiles/scripts/take-over-wifi.sh --yes  # skip confirmation (for scripts)
+```
+
+It detects the wifi iface, refuses to run if NM is already managing
+it, warns when no ethernet is up, comments out wifi blocks in
+`/etc/network/interfaces` (with timestamped backup), stops
+`iwd`/`wpa_supplicant`/`systemd-networkd` if active, drops the NM
+conf.d snippet, restarts NM, and prompts for SSID + password. Run it
+when you're ready, not during the initial install.
+
+**Manual path** (if the script doesn't fit your case):
+
+Once safely on a wired connection (or with the SSID/password
+memorised), find which backend is currently driving the wifi:
+
+```bash
+systemctl is-active iwd                       # most common on Intel cards
+systemctl is-active wpa_supplicant
+systemctl is-active systemd-networkd
+grep -nE 'iface\s+wl' /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null
+```
+
+Then disable it and tell NM to manage the device:
+
+```bash
+# If iwd is the standalone backend:
+sudo systemctl disable --now iwd
+
+# If wpa_supplicant was launched from /etc/network/interfaces:
+sudo nvim /etc/network/interfaces       # comment out the `iface wlp...` block
+sudo systemctl disable --now wpa_supplicant 2>/dev/null
+
+# If systemd-networkd had a .network file for it:
+sudo rm /etc/systemd/network/<file-that-matched-the-iface>.network
+sudo systemctl restart systemd-networkd
+
+# Now make NM the global owner:
+sudo install -d -m 0755 /etc/NetworkManager/conf.d
+sudo tee /etc/NetworkManager/conf.d/10-globally-managed-devices.conf >/dev/null <<'EOF'
+[ifupdown]
+managed=true
+EOF
+sudo systemctl restart NetworkManager
+sleep 3
+
+# Confirm and connect:
+nmcli device status                     # wlp... should be "disconnected"
+nmcli device wifi connect "YOUR_SSID" password "YOUR_PASSWORD"
+```
+
+After this, the polybar wlan pill renders correctly and `wifi-menu.sh`
+works as designed. The setup script's `ensure_nm_managed` step in
+`install_phase` is diagnostic-only — it warns when an interface is
+unmanaged but won't change anything, because doing it automatically
+during install can drop the network the install is using.
+
+If you ever want to revert (give the device back to iwd / etc.):
+
+```bash
+sudo rm /etc/NetworkManager/conf.d/10-globally-managed-devices.conf
+sudo systemctl restart NetworkManager
+sudo systemctl enable --now iwd        # or whichever backend was original
+```
+
 ---
 
 ## Power management (TLP + acpi + thermald + powertop)

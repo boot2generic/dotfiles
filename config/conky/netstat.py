@@ -8,7 +8,11 @@ LISTENING PORTS section (listenports.py) of the same conky panel.
 """
 import subprocess, re, sys, json, os, time
 
-MAX_SHOW = 12
+# Bumped from 12 to 28 after the conky NEW PROCESSES + TOP PROCESSES
+# blocks were retired — CONNECTIONS now fills the bottom of the panel.
+# 28 fits comfortably in conky's default panel height at JetBrainsMono
+# size 8.  If the panel ever wraps off-screen, drop this number.
+MAX_SHOW = 28
 
 # SECURITY: store the byte-counter state in a per-user, mode-700
 # directory rather than a predictable /tmp path.  The state file leaks

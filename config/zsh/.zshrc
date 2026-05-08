@@ -60,9 +60,25 @@ HISTFILE="$HOME/.zsh_history"
 
 setopt HIST_IGNORE_ALL_DUPS    # de-duplicate history
 setopt HIST_IGNORE_SPACE       # don't save commands starting with space
-setopt SHARE_HISTORY           # share history across sessions
-setopt APPEND_HISTORY
 setopt EXTENDED_HISTORY        # save timestamp + duration
+
+# Per-pane up-arrow, shared search.
+#
+# We deliberately do NOT enable SHARE_HISTORY.  SHARE_HISTORY makes
+# every shell import other shells' commands into its in-memory
+# history on every prompt, which means up-arrow in tmux pane A walks
+# through commands typed in pane B / window C / yesterday's session.
+# That breaks the "up-arrow = stuff I just typed here" muscle memory.
+#
+# INC_APPEND_HISTORY writes each command to $HISTFILE the moment it
+# runs, so the disk file contains everything from every pane — but
+# the in-memory history of each shell stays per-pane.  Up-arrow then
+# only walks THIS pane's commands.
+#
+# Ctrl-r still searches across panes via the custom fzf widget at the
+# bottom of this file (history-fzf-disk-widget), which reads $HISTFILE
+# directly without merging it into the running shell's in-memory history.
+setopt INC_APPEND_HISTORY      # write to $HISTFILE immediately, no merge
 
 # SECURITY: never persist commands that look like they contain credentials.
 # zsh checks every command line against this glob; a match drops the line
@@ -168,7 +184,7 @@ alias tn='tmux new-session -s'
 
 # System
 alias free='free -h'
-alias top='htop'
+alias top='btop'
 alias ports='ss -tulpn'
 
 # ── bat (pretty cat with syntax highlighting) ─────────────────
@@ -304,6 +320,57 @@ fcp() {
         | fzf --prompt='Copy path > ')
     [ -n "$path" ] && echo -n "$path" | xclip -selection clipboard && echo "Copied: $path"
 }
+
+# ── Nix package manager (optional, opt-in) ───────────────────
+# Sourced by /etc/profile.d/nix.sh after a multi-user `local_setup.sh
+# install_nix` run.  Plain `apt`-only systems silently skip — none of
+# this fires unless Nix is installed.  The hook chain:
+#   • /etc/profile.d/nix.sh         → puts `nix`, `~/.nix-profile/bin`
+#                                      on PATH for every login shell.
+#   • direnv hook                   → makes `cd <project>` notice an
+#                                      .envrc file in the dir.
+#   • ~/.config/direnv/direnvrc     → sources nix-direnv's `use flake`
+#                                      so `.envrc` containing `use flake`
+#                                      auto-activates the project's
+#                                      Nix dev shell on cd, and tears
+#                                      it down on cd-out.  Cached
+#                                      between invocations so it's fast.
+# Starter flakes live in <repo>/templates/.  See README for the model.
+if command -v direnv >/dev/null 2>&1; then
+    eval "$(direnv hook zsh)"
+fi
+
+# ── Ctrl-r: search FULL on-disk history (not just this pane) ──
+# Pairs with the INC_APPEND_HISTORY / no-SHARE_HISTORY policy at the
+# top of this file.  Up-arrow walks only commands typed in THIS pane
+# (in-memory history); Ctrl-r reads $HISTFILE directly so it sees
+# every command from every pane / session ever — without polluting
+# the in-memory history (so up-arrow stays per-pane).
+#
+# Defined AFTER `~/.fzf.zsh` (which would otherwise bind ^R to the
+# default fzf-history-widget that reads in-memory history only).
+history-fzf-disk-widget() {
+    local selected
+    # zsh extended_history format: lines look like
+    #     ": 1234567890:0;ls -la"
+    # Strip the timestamp prefix when present, leave plain lines alone.
+    # awk dedupes while preserving order; tac reverses to put most-
+    # recent commands at the top of the fzf list.
+    selected="$(
+        sed -E 's/^: [0-9]+:[0-9]+;//' "$HISTFILE" 2>/dev/null \
+          | awk '!seen[$0]++' \
+          | tac \
+          | fzf --height=40% --layout=reverse --tiebreak=index \
+                --query "$LBUFFER" --no-multi --exit-0 \
+                --prompt='history (all panes)> '
+    )"
+    if [[ -n "$selected" ]]; then
+        LBUFFER="$selected"
+    fi
+    zle reset-prompt
+}
+zle -N history-fzf-disk-widget
+bindkey '^R' history-fzf-disk-widget
 
 # ── Starship prompt ───────────────────────────────────────────
 export STARSHIP_CONFIG="$HOME/.config/starship/starship.toml"

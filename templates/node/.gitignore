@@ -1,0 +1,9 @@
+.direnv/
+result
+result-*
+node_modules/
+dist/
+.next/
+.nuxt/
+build/
+*.log

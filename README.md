@@ -159,6 +159,33 @@ which belong in any "fresh install" routine:
   deploy on an offline machine gives a different image than running it
   on a connected one.
 
+#### Per-project Nix dev shells (apt stays the system PM)
+
+Setup also installs the **Nix package manager** alongside apt — used
+strictly for per-project reproducible dev shells via `nix develop` +
+direnv. Apt remains the system PM (drivers, services, system tools);
+Nix never overrides anything outside a project directory you've
+explicitly opted into.
+
+The everyday workflow:
+
+```bash
+# Once per project: copy a starter flake and tell direnv to load it.
+cp -r ~/dotfiles/templates/python-cuda/. /path/to/your-project/
+cd /path/to/your-project
+direnv allow
+
+# That's it.  cd in → tools available; cd out → tools gone.
+which python   # /nix/store/...-python-3.11.../bin/python
+exit-or-cd-elsewhere
+which python   # /usr/bin/python3 (apt's, back to normal)
+```
+
+Skip with `--no-nix` if you don't want Nix at all — apt-only setups
+still work end-to-end. See [`readme/nix.md`](readme/nix.md) and
+[`templates/`](templates/) for the full model and starter flakes
+(Python, Python+CUDA, Node, Rust).
+
 #### Personal config (git, ssh, gpg) is intentionally NOT in this repo
 
 These dotfiles configure the *desktop environment* only. Git
@@ -338,6 +365,7 @@ of the box. Desktops without those keys can use the `Mod+F-row` fallback.
 | [vpn](readme/vpn.md)                   | Mullvad + WireGuard — install, polybar, kill switch  |
 | [security](readme/security.md)         | Threat model, harden/unharden, what's still on you   |
 | [system](readme/system.md)             | Audio, brightness, clipboard, network, screenshots   |
+| [nix](readme/nix.md)                   | Nix package manager (apt-default, Nix-opt-in model)  |
 
 ---
 

@@ -1,0 +1,12 @@
+.direnv/
+result
+result-*
+.venv/
+__pycache__/
+*.pyc
+# ML scratch
+checkpoints/
+runs/
+wandb/
+*.ckpt
+*.pt

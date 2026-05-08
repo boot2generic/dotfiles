@@ -14,26 +14,91 @@
 # Notifications via notify-send (dunst).  All sub-prompts use rofi's
 # fuzzy filter so typing a few characters narrows the list quickly.
 #
-# Exits silently if NetworkManager isn't installed (e.g., a headless VM).
+# Logging: when invoked from polybar's click-left, stdout/stderr is
+# redirected to ~/.cache/polybar/wifi-menu.log (see polybar config.ini
+# [module/wlan]).  `tail -f ~/.cache/polybar/wifi-menu.log` while
+# clicking the wifi pill is the canonical way to debug this script.
+# Run `wifi-menu.sh --diag` from a terminal to dump the environment +
+# tool detection without popping any menus.
 
 set -u
+set -o pipefail
+# Print every command run when WIFI_MENU_DEBUG=1 — handy with
+# `WIFI_MENU_DEBUG=1 ~/.config/polybar/scripts/wifi-menu.sh` from a
+# terminal.
+[[ "${WIFI_MENU_DEBUG:-0}" == 1 ]] && set -x
 
-if ! command -v nmcli >/dev/null 2>&1; then
-    notify-send -u critical "Wifi" "nmcli not installed (NetworkManager missing)"
-    exit 1
+# Self-diagnostic mode: print every dependency we look at and the
+# computed wifi-iface / SSID / radio state, then exit.  No menus popped.
+if [[ "${1:-}" == "--diag" ]]; then
+    printf "wifi-menu.sh diagnostic\n=======================\n"
+    for cmd in nmcli rofi notify-send nm-connection-editor alacritty \
+               iw rfkill; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            printf "  %-22s OK    (%s)\n" "$cmd" "$(command -v "$cmd")"
+        else
+            printf "  %-22s MISSING\n" "$cmd"
+        fi
+    done
+    printf "\nNetworkManager devices:\n"
+    nmcli -t -f DEVICE,TYPE,STATE device 2>&1 | sed 's/^/  /'
+    printf "\nDetected wifi iface : %s\n" \
+        "$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
+           | awk -F: '$2 == "wifi" {print $1; exit}')"
+    printf "Active SSID         : %s\n" \
+        "$(nmcli -t -f ACTIVE,SSID device wifi list 2>/dev/null \
+           | awk -F: '$1 == "yes" {print $2; exit}')"
+    printf "Wifi radio          : %s\n" "$(nmcli radio wifi 2>&1)"
+    exit 0
 fi
+
+# Toast helper — falls back to stderr if dunst isn't running so we
+# don't fail-silently when the user clicks but nothing is visible.
+toast() {
+    local urgency="$1"; shift
+    local title="$1"; shift
+    local body="$1"; shift
+    if command -v notify-send >/dev/null 2>&1 \
+       && notify-send -u "$urgency" "$title" "$body" 2>/dev/null; then
+        return 0
+    fi
+    printf "[%s] %s: %s\n" "$urgency" "$title" "$body" >&2
+}
+
+# Hard preconditions: bail early with a visible toast (or a stderr
+# line if dunst isn't running) if any tool we depend on is missing.
+for cmd in nmcli rofi; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        toast critical "Wifi" "$cmd not installed — wifi menu can't run"
+        exit 1
+    fi
+done
+
+# Ensure the log dir exists so polybar's redirect (see config.ini
+# [module/wlan] click-left) doesn't fail silently on first invocation.
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/polybar" 2>/dev/null || true
+
+# Print one timestamp line per click — gives a heartbeat in the log so
+# the user can confirm clicks actually reach the script.  ISO timestamp
+# avoids locale-formatted ambiguity in logs.
+printf '%s ── click ──\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
 
 # Resolve the wifi device once — referenced by several actions.  May be
 # empty on a desktop / VM with no wireless hardware (then "Connect" still
 # shows but produces "No networks found", which is the right UX).
+#
+# `|| true` swallows pipefail's exit on `awk` closing the pipe early
+# (`exit` after first match).  Without this the whole script aborts
+# under `set -o pipefail` before showing the menu — invisible failure.
 WIFI_IFACE="$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
-              | awk -F: '$2 == "wifi" {print $1; exit}')"
+              | awk -F: '$2 == "wifi" {print $1; exit}' || true)"
 
-# Active SSID (empty if disconnected)
+# Active SSID (empty if disconnected).  Same `|| true` pipefail guard
+# as WIFI_IFACE above.
 ACTIVE_SSID="$(nmcli -t -f ACTIVE,SSID device wifi list 2>/dev/null \
-               | awk -F: '$1 == "yes" {print $2; exit}')"
+               | awk -F: '$1 == "yes" {print $2; exit}' || true)"
 
-WIFI_RADIO="$(nmcli radio wifi 2>/dev/null)"
+WIFI_RADIO="$(nmcli radio wifi 2>/dev/null || true)"
 
 # ── Top-level menu ───────────────────────────────────────────
 main_choices=()
