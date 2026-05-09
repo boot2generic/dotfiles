@@ -3,7 +3,7 @@
 # Deployed to: ~/.config/starship/starship.toml
 # ============================================================
 
-format = "$os$username$hostname$directory$git_branch$git_status$python$rust$nodejs$lua$php$c$cmd_duration$jobs$status$character"
+format = "$os$username$hostname$directory$git_branch$git_status$python$rust$nodejs$lua$php$c$cmd_duration$jobs$status $character"
 
 right_format = """$time"""
 
@@ -13,10 +13,19 @@ right_format = """$time"""
 add_newline = false
 
 # ── OS icon ──────────────────────────────────────────────────
+# All module formats use leading-space-only padding (`[ $x]`) instead
+# of bilateral padding (`[ $x ]`).  Reason: when starship concatenates
+# two adjacent `[ A ]` blocks, you get " A  B " — every boundary has a
+# double-space.  With `[ $x]`, adjacent blocks render as " A B" — a
+# single space transition between them, with the powerline pill bg
+# colors still flowing edge-to-edge.  See the `format = ` line at the
+# top: a single literal space sits before `$character` so the prompt
+# arrow always has breathing room from whatever module preceded it,
+# even when only some modules are active.
 [os]
 disabled = false
 style    = "bg:#00e5ff fg:#0d0d1a bold"
-format   = "[ $symbol ]($style)"
+format   = "[ $symbol]($style)"
 
 [os.symbols]
 Debian  = ""
@@ -29,18 +38,22 @@ Macos   = ""
 show_always = false
 style_user  = "bg:#1a1a2e fg:#00e5ff bold"
 style_root  = "bg:#1a1a2e fg:#ff0055 bold"
-format      = "[ $user ]($style)"
+format      = "[ $user]($style)"
 
 # ── Hostname — no ssh_symbol, plain hostname always shown ─────
 [hostname]
 ssh_only  = false
 style     = "bg:#1a1a2e fg:#8888cc"
-format    = "[ $hostname ]($style)"
+format    = "[ $hostname]($style)"
 
 # ── Directory ────────────────────────────────────────────────
+# Trailing literal space outside the bracket dropped — was creating a
+# visible non-bg gap between the directory pill and the git_branch
+# pill.  read_only now sits flush to the path; same bg color so it
+# blends visually.
 [directory]
 style             = "bg:#12121f fg:#e2e2ff bold"
-format            = "[ $path ]($style)[$read_only]($read_only_style) "
+format            = "[ $path]($style)[$read_only]($read_only_style)"
 truncation_length = 4
 truncate_to_repo  = true
 read_only         = " "
@@ -56,12 +69,16 @@ read_only_style   = "bg:#12121f fg:#ff0055"
 # ── Git ──────────────────────────────────────────────────────
 [git_branch]
 style  = "bg:#0d0d1a fg:#ff00cc bold"
-format = "[ $symbol$branch(:$remote_branch) ]($style)"
+format = "[ $symbol$branch(:$remote_branch)]($style)"
 symbol = " "
 
+# git_status sits flush against git_branch (same bg colour) — its
+# leading content is the status flags directly.  Trailing literal
+# space removed; adjacent (non-bg) language modules now sit one
+# leading-space away rather than two.
 [git_status]
 style       = "bg:#0d0d1a fg:#00ff41"
-format      = "[$all_status$ahead_behind]($style) "
+format      = "[$all_status$ahead_behind]($style)"
 conflicted  = " "
 ahead       = "⇡${count} "
 behind      = "⇣${count} "
@@ -76,50 +93,50 @@ deleted     = "✘${count} "
 # ── Language versions ────────────────────────────────────────
 [python]
 style  = "fg:#ffcc00"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 [rust]
 style  = "fg:#ff6b35"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 [nodejs]
 style  = "fg:#00ff41"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 [lua]
 style  = "fg:#00e5ff"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 [php]
 style  = "fg:#9900ff"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 [c]
 style  = "fg:#00e5ff"
-format = "[ $symbol$version ]($style)"
+format = "[ $symbol$version]($style)"
 symbol = " "
 
 # ── Command duration ─────────────────────────────────────────
 [cmd_duration]
 min_time = 2000
 style    = "fg:#5555aa"
-format   = "[ took $duration ]($style)"
+format   = "[ took $duration]($style)"
 
 # ── Jobs / status ────────────────────────────────────────────
 [jobs]
 style  = "fg:#ff00cc"
-format = "[$symbol$number ]($style)"
+format = "[ $symbol$number]($style)"
 symbol = ""
 
 [status]
 disabled = false
 style    = "fg:#ff0055 bold"
-format   = "[$symbol$status ]($style)"
+format   = "[ $symbol$status]($style)"
 symbol   = " "
 
 # ── Prompt character ─────────────────────────────────────────
