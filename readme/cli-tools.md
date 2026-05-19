@@ -105,6 +105,36 @@ Add memory bars per-NUMA: `F2 → Meters → Add`.
 
 ---
 
+## btop — fancier process / resource monitor
+
+`btop` is a TUI resource monitor with mouse support, per-thread CPU
+graphs, GPU readout, and per-process I/O — denser than `htop` but
+slower to start. Both are installed; pick by reflex.
+
+```bash
+btop                              # full-screen TUI
+btop --preset 2                   # alternate layout (3 = single-pane, etc.)
+btop --utf-force                  # force UTF-8 box drawing on pickier terms
+```
+
+Inside btop:
+
+| Keys              | Action                              |
+|-------------------|-------------------------------------|
+| `q` / `Esc`       | Quit                                |
+| `+` / `-`         | Adjust update interval              |
+| `m` / `c` / `n` / `p` | Sort by mem / CPU / name / PID  |
+| `f`               | Filter processes (live)             |
+| `Enter`           | Show full process info              |
+| `t`               | Tree view                           |
+| `e`               | Toggle process command-line view    |
+| `1` / `2` / `3` / `4` | Toggle CPU / memory / network / proc panel |
+
+Customise by editing `~/.config/btop/btop.conf` (auto-created on
+first run).
+
+---
+
 ## fastfetch — system info banner
 
 Like `neofetch`, but actively maintained. Run on shell startup to see your

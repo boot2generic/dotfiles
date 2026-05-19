@@ -42,10 +42,17 @@ Aliases in `.zshrc`:
 | prefix `q`          | Show pane numbers (then press a number to jump) |
 | prefix `x`          | Kill pane                                       |
 
-The `Ctrl-hjkl` bindings detect if vim/nvim is the active program and
-forward the keystroke to it instead — so you can move between tmux panes
-*and* nvim splits with the same chord. (Magic via the
-[`vim-tmux-navigator`](https://github.com/christoomey/vim-tmux-navigator)
+The `Ctrl-hjkl` bindings detect if a vim-style modal editor is the
+active program in the focused pane and forward the keystroke to it
+instead — so you can move between tmux panes *and* the editor's
+internal splits with the same chord. The detection regex matches:
+
+- `vim` / `view` / `vimdiff` (classic vim)
+- `nvim` / `nvimx` / `nvimdiff` (neovim)
+- `nvim-qt` (neovim Qt frontend)
+- `helix` / `hx` (modern Rust-based modal editor with vim-like splits)
+
+(Magic via the [`vim-tmux-navigator`](https://github.com/christoomey/vim-tmux-navigator)
 detection trick built into the config.)
 
 ---

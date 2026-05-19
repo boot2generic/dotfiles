@@ -67,10 +67,10 @@ otherwise still applies.
 
 The dotfiles have **two distinct security postures**:
 
-| Mode      | When                          | sudo policy        | firewall | DNS        | auto-updates |
-|-----------|-------------------------------|--------------------|----------|------------|--------------|
-| Install   | While running `setup`         | NOPASSWD ALL       | none     | dhcpcd     | off          |
-| Hardened  | After `./local_setup.sh harden` | Narrow Cmnd_Alias | ufw deny | Quad9 DoT | enabled      |
+| Mode      | When                          | sudo policy        | firewall | DNS                    | auto-updates |
+|-----------|-------------------------------|--------------------|----------|------------------------|--------------|
+| Install   | While running `setup`         | NOPASSWD ALL       | none     | NetworkManager / dhcpcd | off          |
+| Hardened  | After `./local_setup.sh harden` | Narrow Cmnd_Alias | ufw deny | systemd-resolved opportunistic DoT (Cloudflare + Quad9; Google plain `8.8.8.8` fallback) | enabled |
 
 `setup` deliberately uses the permissive *install* mode so the
 provisioning pipeline doesn't prompt for a password every five seconds.
@@ -271,27 +271,120 @@ of root entirely.
 - That's it — no port allowlist for printers/cast/etc., add those
   yourself if you need them.
 
-### 3. unattended-upgrades
+### 3. unattended-upgrades (security-only)
 - Installs `unattended-upgrades` + `apt-listchanges`.
-- Drops `/etc/apt/apt.conf.d/20auto-upgrades` enabling the daily timer
-  for `Debian-Security` packages only — feature releases still need
+- Drops `/etc/apt/apt.conf.d/20auto-upgrades` to drive the daily timer.
+- Drops a managed `/etc/apt/apt.conf.d/50unattended-upgrades` from
+  `config/system/etc/apt/apt.conf.d/50unattended-upgrades` whose
+  `Origins-Pattern` allowlist contains **only `Debian-Security`** labels.
+  This deliberately avoids the standard Debian default of also including
+  stable + stable-updates + backports + proposed-updates — that combination
+  silently auto-bumps point releases under you, which is the historic
+  footgun. CVEs install automatically; feature releases still need a
   manual `apt upgrade`.
+- If `mailx` (`bsd-mailx` / `s-nail`) is installed, also drops a
+  `51unattended-upgrades-mail` snippet that emails root on change.
+  Without mailx the journal is the only audit trail
+  (`journalctl -u unattended-upgrades.service`).
 
-### 4. systemd-resolved + Quad9 DoT
-- Configures `/etc/systemd/resolved.conf.d/dnsovertls.conf` with:
-  - **Primary:** Quad9 (`9.9.9.9`, `149.112.112.112`) over DNS-over-TLS,
-    DNSSEC enforcement (`allow-downgrade`).
-  - **Fallback:** Cloudflare (`1.1.1.1`).
-- Symlinks `/etc/resolv.conf → /run/systemd/resolve/stub-resolv.conf`.
-- Adds `nohook resolv.conf` to `dhcpcd.conf` so dhcpcd doesn't fight
-  resolved on each lease renewal.
+### 4. auditd rules (identity / sudoers / modules / mount)
+- Installs `auditd` + `audispd-plugins`.
+- Drops `config/system/etc/audit/rules.d/dotfiles.rules` into
+  `/etc/audit/rules.d/dotfiles.rules` and loads it via
+  `augenrules --load` (or `systemctl restart auditd` on very old hosts).
+  Other `rules.d/` files are left untouched — `unharden` removes only
+  our rule file.
+- Logged surface:
+  - `-w /etc/{passwd,group,shadow,gshadow} -p wa -k identity`
+  - `-w /etc/sudoers* -p wa -k sudoers`
+  - `init_module` / `finit_module` / `delete_module` on b64 *and* b32 (`-k modules`)
+  - `mount` / `umount2` syscalls (`-k mount`)
+  - `execve` of `sudo`/`su` is shipped **commented out** under
+    `-k privesc`; uncomment if you want it (verbose on a desktop).
 
-Why Quad9? Threat-blocks known-malicious domains, no commercial logging
-in EU operations, supports DoT + DNSSEC. Swap to a different provider
-by editing the `DNS=` line.
+Query the resulting events:
 
-`unharden` reverses **all four** changes — sudoers back to broad
-NOPASSWD, ufw disabled, unattended-upgrades off, DNS back to dhcpcd.
+```bash
+sudo ausearch -k identity --start today
+sudo ausearch -k sudoers  --start week-ago
+sudo ausearch -k modules  --start today
+sudo ausearch -k mount    --start today --interpret
+sudo auditctl -l                                    # what's loaded now
+```
+
+The Debian-Level-2 / CIS "process accounting on every syscall" rules
+are intentionally **not** shipped — on a single-user workstation they
+flood logs without changing the threat picture. Add them by hand if
+you're using these dotfiles on a multi-user box.
+
+### 5. systemd-resolved + DNS-over-TLS (opportunistic)
+
+`harden_dot()` (which **replaces** the older `harden_dns` /
+`dhcpcd + static domain_name_servers=…` path entirely) installs
+`systemd-resolved` if missing and drops two managed files:
+
+- `/etc/systemd/resolved.conf.d/cyberpunk-dot.conf` from
+  `config/system/etc/systemd/resolved.conf.d/cyberpunk-dot.conf`:
+  - `DNSOverTLS=opportunistic` — try DoT first, fall back to plain
+    DNS when TCP/853 is blocked or the cert doesn't validate.
+  - `DNSSEC=allow-downgrade` — validate signatures when the upstream
+    supports them, don't NXDOMAIN every lookup when it doesn't.
+  - `DNS=1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com
+    9.9.9.9#dns.quad9.net` — Cloudflare + Quad9 with the `#name`
+    SNI/cert-CN hints resolved uses to authenticate the TLS
+    connection. (Without `#name`, opportunistic mode has no
+    expected-CN to compare and skips DoT entirely.)
+  - `FallbackDNS=8.8.8.8 8.8.4.4` — Google as plain (no `#name`)
+    last resort if every primary is unreachable. Liveness over
+    privacy; remove the line if you'd rather hard-fail in that case.
+- `/etc/NetworkManager/conf.d/cyberpunk-dns.conf` (`[main]
+  dns=systemd-resolved`) — NM stops fighting `/etc/resolv.conf` on
+  every connection event and pushes per-link DNS into resolved via
+  D-Bus instead. This preserves per-link DNS for VPN / corporate
+  resolvers under our global DoT policy.
+
+Then atomically `ln -sf /run/systemd/resolve/stub-resolv.conf
+/etc/resolv.conf` (defensive `chattr -i` first, in case an older
+hardening guide pinned the file immutable), `systemctl reload
+NetworkManager`, `systemctl restart systemd-resolved`.
+
+#### The "opportunistic" trade-off
+
+`opportunistic` is deliberately not `yes` (strict). The threat model
+here is a **roaming laptop on untrusted wifi** — and strict mode is
+unworkable on two real-world networks:
+
+- **Captive portals** (hotels, airports, conferences) typically block
+  TCP/853 outbound. A strict policy can't resolve
+  `captive.portal.example` to even load the login page; the user is
+  bricked.
+- **Enterprise networks** sometimes MITM all TLS, including DoT, with
+  an internal CA. Strict refuses to trust the cert and bricks the user
+  identically.
+
+Opportunistic mode degrades gracefully in both: encrypted when
+the upstream supports it, plain DNS when it doesn't.
+
+The cost is **RST-downgradability**: a hostile network can drop your
+TCP/853 SYN with an RST and force you back to plain DNS, where they
+can see (and potentially tamper with) every query. The conky `DoT`
+row (`check_dot()` in `~/.config/conky/health.py`, see "Conky security
+monitoring" below) tells you when this is happening:
+
+| Conky `DoT` state | Meaning |
+|---|---|
+| `OK active on <iface>` | `+DNSOverTLS` on the default-route link — encrypted. |
+| `WARN fallback (plain)` | `-DNSOverTLS` — resolved is configured but the upstream isn't honouring it. Treat DNS as visible; consider routing over Mullvad. |
+| `DIM not configured` | systemd-resolved isn't running — you haven't `harden`ed, or `unharden` undid it. |
+
+`unharden` reverses **all five** changes — sudoers back to broad
+NOPASSWD, ufw disabled, unattended-upgrades off, auditd
+`dotfiles.rules` removed (other rules.d/ entries left alone), and
+`unharden_dot()` drops both `cyberpunk-*.conf` drop-ins, removes the
+`/etc/resolv.conf` symlink **before** stopping resolved (so there's no
+window of missing nameservers), reloads NM, kicks the active
+connection if NM didn't rewrite `/etc/resolv.conf` on reload alone,
+and disables `systemd-resolved`.
 
 ---
 
@@ -352,17 +445,91 @@ Look up each plugin's current SHA, paste it in. Trade-off: explicit
 upgrades only (`:Lazy update`, manually re-paste SHAs).
 
 ### Sensitive command audit
-The harden phase enables auto-security-updates but doesn't enable
-auditd. If you want a forensic record of `sudo` invocations:
-```bash
-sudo apt install auditd
-sudo auditctl -w /etc/sudoers -p wa -k sudoers
-sudo auditctl -w /var/log/auth.log -p wa -k sudo-auth
-```
+`harden` now installs `auditd` and ships
+`config/system/etc/audit/rules.d/dotfiles.rules` for identity files,
+sudoers, kernel modules, and mount/umount syscalls (see "What `harden`
+does" → §4 above). If you want a forensic record of every `sudo`
+invocation specifically, uncomment the `execve(sudo)` / `execve(su)`
+rule in `dotfiles.rules` (it's shipped commented under `-k privesc`)
+and `sudo augenrules --load`. Verbose — only worth it if you're
+actively chasing an incident.
 
 ### USB / device control
 Out of scope. If you handle sensitive data, look at
 [`usbguard`](https://github.com/USBGuard/usbguard).
+
+---
+
+## Conky security monitoring (always-on, top-right of screen)
+
+Conky's three security-oriented panels run continuously while you're
+logged in. They're not a replacement for proper EDR — they're cheap
+visual indicators that complement auditd's forensic log, and the same
+checks are also available from the CLI via `scripts/audit.sh` and
+`scripts/dotfiles-doctor.sh` (see [`readme/system.md`](system.md) →
+"Drift monitoring" and "Security monitoring").
+
+### HEALTH panel — `~/.config/conky/health.py`
+
+Eighteen checks total, of which these four are the security stack:
+
+| Check | What it tracks | Conky label |
+|---|---|---|
+| `check_critical_file_drift` | sha256 of `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, every file under `/etc/sudoers.d/`, `~/.ssh/authorized_keys`, systemd unit files, `/etc/cron.d/` against a stored baseline. Any change is BAD. | `critical files` |
+| `check_recent_sudo_invocations` | Successful `sudo` invocations in the last 24 h (from auth.log / journal). Pure visibility — high count isn't BAD by itself, but a spike when you weren't sudo'ing is. Distinct from the existing `failed sudo 24h` counter (which tracks **failed** sudo attempts, the brute-force indicator). | `sudo ok 24h` |
+| `check_suid_drift` | Full-rootfs SUID/SGID inventory. New SUID binary appearing between runs is BAD. Cached for 23 h to avoid re-`find /` every conky cycle (the scan is ~seconds even with hot cache). | `suid drift` |
+| `check_parent_anomaly` | Walks the process tree looking for interactive shells whose parent is a long-running daemon (`sshd`, `cron`, `apache2`, etc.) — the canonical post-exploit reverse-shell pattern. | `parent anomaly` |
+
+The baselines live next to the conky configs:
+`~/.config/conky/baseline-{critical-files,suid,ports,modules}.txt`.
+Refresh after a legitimate change (e.g. installing a new SUID
+binary):
+
+```bash
+./scripts/audit.sh --refresh-baseline critical-files
+./scripts/audit.sh --refresh-baseline suid
+```
+
+### Beacon detection — `~/.config/conky/netstat.py`
+
+Persistent JSON state under `$XDG_RUNTIME_DIR/conky/` records every
+*newly appearing* `(ip, port, proc)` triple's timestamp. When the same
+triple has fired ≥4 times with mean interval ≥30 s and
+coefficient-of-variation (`stdev/mean`) under 0.15 — i.e. "too regular
+for a human-driven workload" — the row renders with a `⏱` marker
+(yellow) and the header summary adds `<n> beaconing`.
+
+The thresholds (`BEACON_MIN_EVENTS`, `BEACON_CV_THRESHOLD`,
+`BEACON_MIN_MEAN_SECS`, `BEACON_HISTORY_TTL`) are tunable at the top
+of `netstat.py`. Sub-30 s mean intervals are excluded on purpose —
+that's where most DNS / NTP / metrics-scrape noise lives. Triples
+quiet for over an hour age out (`BEACON_HISTORY_TTL`) so a long-dead
+binary doesn't stay flagged forever.
+
+### Listener tagging — `~/.config/conky/listenports.py`
+
+Every listening port renders its bound binary's `exe` path. Path is
+rendered in red (`${color5}`) when:
+
+- the resolved path is **outside** `/usr/`, `/snap/`,
+  `/var/lib/flatpak/`, and friends (i.e. a listener bound by a binary
+  that wasn't packaged by apt / snap / flatpak), **or**
+- the path ends in `(deleted)` — the kernel's marker for a process
+  whose binary was unlinked after exec, a classic post-exploit trick
+  (delete the dropper, keep the listener resident).
+
+This is a visual prompt, not a verdict. A development build of a tool
+you wrote yourself living under `~/code/` will read as red here — and
+that's correct, the panel is asking "are you sure that's supposed to
+be listening?".
+
+### Audit trail tied to harden
+
+The conky panel is the always-visible surface; auditd (`-k identity` /
+`sudoers` / `modules` / `mount`, see §4 of "What `harden` does" above)
+is the forensic surface — the conky check fires fast, the auditd log
+tells you exactly what changed and which UID did it. Run them
+together.
 
 ---
 
@@ -378,12 +545,23 @@ sudo -l
 # 2. ufw — should be active, default deny, ssh allowed
 sudo ufw status verbose
 
-# 3. unattended-upgrades — should be enabled and active
+# 3. unattended-upgrades — should be enabled and active,
+#    and the Origins-Pattern should be Debian-Security ONLY
 systemctl is-enabled unattended-upgrades.service
 systemctl is-active  unattended-upgrades.service
+grep -A20 'Origins-Pattern' /etc/apt/apt.conf.d/50unattended-upgrades \
+    | grep -E 'Debian-Security|stable|backports|proposed'
+# expected: only the Debian-Security line uncommented
 
-# 4. DNS — should show Quad9, "+DNSOverTLS", "+DNSSEC"
+# 3b. auditd — rules loaded, expected keys present
+sudo auditctl -l | grep -E '\-k (identity|sudoers|modules|mount)'
+sudo ausearch -k identity --start today --raw | head    # smoke-test
+
+# 4. DNS — Cloudflare + Quad9 listed, per-link "+DNSOverTLS"/"+DNSSEC"
+#    on the default-route iface (WARN on "-DNSOverTLS" — captive
+#    portal or upstream RST-downgrade, see "opportunistic" trade-off).
 resolvectl status | grep -E "DNS Servers|Protocols"
+ls -la /etc/resolv.conf       # -> /run/systemd/resolve/stub-resolv.conf
 
 # 5. Mullvad keyring PRIMARY fingerprint AND primary count
 #    (subkeys are filtered out — `--show-keys` lists fpr for both
@@ -428,9 +606,19 @@ flips every step back. Specifically:
 - `/etc/sudoers.d/<user>` → broad NOPASSWD ALL.
 - `ufw --force disable`.
 - `/etc/apt/apt.conf.d/20auto-upgrades` → both periodicities to "0",
+  `/etc/apt/apt.conf.d/51unattended-upgrades-mail` removed,
   `unattended-upgrades.service` disabled.
-- `/etc/systemd/resolved.conf.d/dnsovertls.conf` removed; dhcpcd's
-  `static domain_name_servers=1.1.1.1 8.8.8.8` line restored.
+- `/etc/audit/rules.d/dotfiles.rules` removed and `augenrules --load`
+  re-applied. Other entries under `rules.d/` are deliberately left in
+  place — if you added rules of your own, `unharden` won't strip them.
+- `/etc/systemd/resolved.conf.d/cyberpunk-dot.conf` and
+  `/etc/NetworkManager/conf.d/cyberpunk-dns.conf` removed; the
+  `/etc/resolv.conf → stub-resolv.conf` symlink dropped *before*
+  `systemd-resolved` is disabled (no window of missing nameservers);
+  NetworkManager reloaded so it owns `/etc/resolv.conf` again, with a
+  fall-back `nmcli connection up <active>` nudge if NM didn't rewrite
+  on reload alone. (`unharden_dot()` — replaces the older
+  `unharden_dns` path that touched `dhcpcd.conf`.)
 
 ### The chicken-and-egg with unharden
 

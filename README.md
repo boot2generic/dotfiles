@@ -24,7 +24,92 @@ machine, run one script, get a fully-configured i3wm + tmux + neovim setup.
 
 ## Install
 
-Two install paths — pick whichever applies:
+Four install paths.  The decision tree below picks the right one in 30 seconds; the **feature-parity matrix** further down has the full capability table.
+
+### Decision tree
+
+```
+Are you provisioning THIS machine (sitting at the console / SSH'd in)?
+├── Yes — full desktop with X11 + i3 + polybar + picom (the original)
+│         → Path A:  ./local_setup.sh setup
+├── Yes — full desktop with KDE Plasma 6 + Wayland + SDDM + PipeWire
+│         (recommended for NVIDIA + multi-monitor + high-refresh-rate)
+│         → Path A:  ./local_setup.sh setup --plasma
+│           (see readme/plasma.md for details)
+├── Yes — and you only want the SHELL stack (zsh, tmux, nvim, starship)
+│         → Path D:  ./scripts/install-shell.sh
+│           (also handles --offline using a pre-built bundle)
+└── No, you're on a controller box reaching a remote machine via SSH
+    ├── Remote is a desktop VM (you want the full GUI on it)
+    │     → Path B:  python3 vm_automation.py setup
+    └── Remote is a server (shell-only, no GUI)
+          → Path C:  ./scripts/provision-server.sh user@host
+```
+
+### Feature-parity matrix
+
+What each path supports, at a glance.  Rows are capabilities; cells are `✓` (supported), `–` (not applicable / out of scope), or `✗` (could in principle but isn't implemented).
+
+| Capability | A. local_setup.sh | B. vm_automation.py | C. provision-server.sh | D. install-shell.sh |
+|---|:-:|:-:|:-:|:-:|
+| **Target stack** | full GUI | full GUI | shell-only | shell-only |
+| **Target location** | local | remote (SSH) | remote (SSH) | local |
+| **Desktop choice** (`--desktop=i3 \| plasma`) | ✓ | ✗ (i3 only) | – | – |
+| **Plasma 6 Wayland + SDDM + PipeWire** | ✓ (`--plasma`) | ✗ | – | – |
+| **NVIDIA-Wayland kernel pieces** (fbdev, early-KMS, PM) | ✓ (plasma + nvidia) | ✗ | – | – |
+| **Distros — Debian/Ubuntu** (apt) | ✓ | ✓ | ✓ | ✓ |
+| **Distros — RHEL/Rocky/Alma/Fedora** (dnf) | – | – | ✓ | ✓ |
+| **Online install** | ✓ | ✓ | ✓ | ✓ |
+| **Offline install** (`--offline` + `bundle/`) | ✗ | ✗ | ✗ | ✓ |
+| **NVIDIA drivers + 32-bit Vulkan + modeset** | ✓ | basic | – | – |
+| **`--cuda` (CUDA toolkit)** | ✓ | ✗ | – | – |
+| **`--steam` (steam-installer + gamemode)** | ✓ | ✗ | – | – |
+| **CPU microcode (intel/amd64)** | ✓ | ✗ | – | – |
+| **NVIDIA open-kernel-dkms classification** | ✓ | ✗ | – | – |
+| **deb822 drop-in for non-free** | ✓ | ✗ (in-place sed) | – | – |
+| **i386 multiarch + 32-bit gaming libs** | ✓ | ✗ | – | – |
+| **Mullvad VPN install** | ✓ | ✓ | – | – |
+| **TLP / power-profiles-daemon coexistence** | ✓ | ✗ | – | – |
+| **fwupd + LVFS firmware updates** | ✓ | ✓ | – | – |
+| **NetworkManager wifi takeover** | ✓ (auto, opt-out) | – | – | – |
+| **Idempotent re-runs** | ✓ | ✓ | ✓ | ✓ |
+| **`--dry-run`** | per-stage | – | ✓ | ✓ |
+| **Nix package manager + flakes** | ✓ (`--no-nix` opts out) | ✗ | ✗ | ✗ |
+| **direnv + nix-direnv** | ✓ | – | ✓ | ✓ |
+| **oh-my-zsh + plugins** | ✓ | ✓ | ✓ (`--no-omz` opts out) | ✓ (`--no-omz` opts out) |
+| **starship prompt** | ✓ | ✓ | ✓ | ✓ |
+| **tmux + tpm + plugins** | ✓ | ✓ | ✓ | ✓ |
+| **neovim + lazy.nvim sync** | ✓ | ✓ | ✓ (`--no-nvim` opts out) | ✓ (`--no-nvim` opts out) |
+| **Validate phase (~50 checks)** | ✓ | ✓ | – | – |
+| **Harden / unharden** (sudoers + ufw + DoT + auto-updates + auditd) | ✓ | ✓ | – | – |
+| **Laptop suspend + dock hooks** (chassis-gated; T14) | ✓ | ✗ | – | – |
+| **NVIDIA Wayland session env + explicit-sync** (NVIDIA-only) | ✓ (`--plasma`) | ✗ | – | – |
+| **Per-monitor refresh / VRR / HDR baseline** (`kscreen-baseline.py`) | ✓ (`--plasma`) | ✗ | – | – |
+
+**Where shell-only paths share code:** Path C and Path D both source `scripts/lib/install-common.sh` for package lists, distro detection, oh-my-zsh / tpm / starship / fd-bat-symlink / default-shell logic.  Adding a tool there propagates to both.
+
+**Where the full-GUI paths diverge:** Path A is the canonical implementation; Path B is the older SSH-pexpect mirror and is intentionally NOT at full feature parity (see the `✗` cells above).  If you want the modern full-GUI behavior on a remote VM, the recommended workflow is: `git push` your dotfiles repo, `git clone` it on the VM, run `./local_setup.sh setup --bypass` there directly.  Path B is kept for the niche case of fully unattended end-to-end setup of a virgin VM via pexpect.
+
+### Beyond install — monitoring + drift
+
+After install, two surfaces keep watch over the machine:
+
+- **Conky security overlay** (always-on, top-right of screen) — the HEALTH panel now
+  rolls in critical-file drift (`/etc/{passwd,shadow,sudoers,sudoers.d/}`, authorized_keys,
+  systemd units, cron.d/), 24 h SUID/SGID drift across the rootfs (cached so it doesn't
+  re-scan every cycle), recent `sudo` invocations (separate from the existing failed-sudo
+  counter), a daemon → interactive-shell parent-anomaly check, and a **DoT** row
+  (`check_dot`) that parses `resolvectl status` and reports OK when `+DNSOverTLS` is
+  active on the default-route link, WARN when it has been downgraded to plain DNS
+  (`-DNSOverTLS`), and DIM when systemd-resolved isn't running. The netstat panel
+  flags periodic-reconnect **beacons** (`⏱` marker) when a `(ip, port, proc)` triple has
+  re-opened ≥4 times with a coefficient-of-variation under 0.15. The listenports panel
+  paints any listener whose binary lives outside `/usr/`, `/snap/`, `/var/lib/flatpak/`
+  (or whose `exe` ends in `(deleted)`) in red. See [`readme/security.md`](readme/security.md)
+  → "Conky security monitoring" for the full check list.
+- **CLI counterparts** — `scripts/audit.sh` (drift-only) and `scripts/dotfiles-doctor.sh`
+  (full one-page report) cover the same ground from SSH or cron. See the scripts table
+  below.
 
 ### A) Provision the local machine
 You're sitting at the box you want to configure.
@@ -50,6 +135,24 @@ Optional NVIDIA add-ons (physical only):
 ./local_setup.sh setup --steam            # adds steam-installer (Debian's Steam bootstrap)
 ./local_setup.sh setup --cuda --steam     # both
 ```
+
+After all four stages finish, `setup` runs an automatic `auto_wifi_takeover`
+step on physical machines whose wifi is stuck in NetworkManager state
+`unmanaged` (Debian's installer parked it under ifupdown +
+wpa_supplicant) **and** whose SSID/PSK are recoverable from
+`/etc/network/interfaces`. The takeover pre-imports the credentials
+into NM as an autoconnect profile *before* stopping the old backend, so
+the network reconnects automatically and you're never stranded
+mid-flight. Skip with `--no-wifi-takeover`:
+
+```bash
+./local_setup.sh setup --no-wifi-takeover  # leave the wifi backend alone
+```
+
+If the credentials aren't extractable, the auto-takeover deliberately
+does nothing and prints a hint to run `scripts/take-over-wifi.sh`
+manually. See [`readme/system.md`](readme/system.md) → "WiFi shows
+'unmanaged'" for the manual flow + rollback instructions.
 
 ### B) Provision a remote VM via SSH
 You're on a controller box and want to set up a separate Debian VM.
@@ -86,6 +189,117 @@ the password file before running.
 
 Both scripts are idempotent — re-running fixes drift instead of reinstalling.
 
+### C) Provision a shell-only remote server (SSH dev box, lab VM, …)
+
+You have a Debian / Ubuntu / Rocky / Alma / Fedora server you only
+ever SSH into. You want the same `zsh` + `oh-my-zsh` + `starship` +
+`tmux` + `nvim` + CLI utilities you have on your laptop, but no GUI
+junk (no X11, no polybar, no fonts, no display manager).
+
+```bash
+ssh-copy-id user@host                                          # one-time, key auth required
+./scripts/provision-server.sh user@host                        # full shell setup
+./scripts/provision-server.sh user@host --no-nvim              # skip nvim (older distros, nvim<0.9)
+./scripts/provision-server.sh user@host --dry-run              # see what it would do
+./scripts/provision-server.sh user@host --no-omz               # slim zsh, no oh-my-zsh
+```
+
+The remote needs **passwordless sudo** for the user (test:
+`ssh user@host 'sudo -n true'` should exit 0). Re-run any time to
+update — the script is idempotent and only does work where state
+has drifted.
+
+What gets installed: `zsh tmux neovim fzf ripgrep fd-find bat git
+curl wget rsync htop unzip nodejs python3 grc direnv` plus
+`build-essential`/`@development-tools` for compiling tree-sitter
+parsers. Plus `starship` (apt/dnf where available, upstream installer
+elsewhere), `oh-my-zsh` + `zsh-autosuggestions` + `zsh-syntax-highlighting`,
+`tpm` + tmux plugins, and `lazy.nvim` plugins synced headlessly.
+
+What gets deployed (subset of `config/`): `~/.zshrc`,
+`~/.config/{starship,tmux,nvim}/`. **No** i3/polybar/picom/rofi/etc.
+— those are GUI-only, useless on a server.
+
+#### Offline / air-gapped servers
+
+For servers with **no outbound internet access** (lab gear, secured
+networks, sneakernet-only boxes), build a bundle on a connected box
+of the *same distro and architecture*, copy the whole dotfiles dir
+to the offline target, and run `install-shell.sh --offline`:
+
+```bash
+# On a connected build box (Debian/Ubuntu, matching arch):
+./scripts/build-bundle.sh
+
+# This creates ./bundle/ (~150-250 MB) containing:
+#   bundle/debs/         — every .deb the install needs (incl. transitive deps)
+#   bundle/git/          — oh-my-zsh, plugins, tpm clones
+#   bundle/starship/     — release binary + sha256
+#   bundle/manifest.txt  — distro/arch metadata read at install time
+
+# Sneakernet the dotfiles dir (incl. bundle/) to the target.
+# rsync, scp from a bridge, USB stick — whatever fits.
+
+# On the offline target:
+./scripts/install-shell.sh --offline
+```
+
+`install-shell.sh` works locally (no SSH) and supports both modes:
+
+| Invocation | What it does |
+|---|---|
+| `./scripts/install-shell.sh`             | Full online install — apt/dnf, github clones, upstream starship |
+| `./scripts/install-shell.sh --offline`   | Reads `bundle/`, no network calls. Apt-distros only. |
+| `./scripts/install-shell.sh --no-nvim`   | Skip neovim setup (older distros, `nvim < 0.9`) |
+| `./scripts/install-shell.sh --no-omz`    | Skip oh-my-zsh — slim zsh + plugins only |
+| `./scripts/install-shell.sh --dry-run`   | Show what would happen without doing it |
+
+The offline install path also works for the use case "I'm sitting at
+the console of an air-gapped box; I copied the dotfiles in via USB."
+
+**Bundle tamper-evidence (opt-in GPG signing).** `bundle/manifest.sha256`
+is the integrity anchor — every file in the bundle is hashed into it,
+and `install-shell.sh --offline` verifies hashes before installing
+anything. sha256 catches bitrot but not a deliberate swap of bundle +
+manifest together. Set `BUNDLE_SIGNING_KEY=<keyid>` when building to
+emit a detached armored signature next to the manifest:
+
+```bash
+BUNDLE_SIGNING_KEY=ABCD1234 ./scripts/build-bundle.sh
+# → bundle/manifest.sha256 + bundle/manifest.sha256.asc
+```
+
+`install-shell.sh --offline` auto-verifies the `.asc` if it's present
+and `gpg` is installed; without `BUNDLE_SIGNING_KEY` the bundle stays
+unsigned and only the hash check runs (the existing
+`INSTALL_SKIP_BUNDLE_CHECK=1` escape hatch still bypasses both layers
+if you really need to).
+
+Caveats baked into `--offline`:
+- **Bundle and target must match**: same distro, same major version,
+  same architecture. The manifest is checked at install time — arch
+  mismatches abort with a clear error.
+- **`nvim` plugin sync is skipped** under `--offline` (lazy.nvim
+  reaches GitHub during `:Lazy sync`). Pre-built plugins can be
+  bundled separately, or pass `--no-nvim` to suppress the warning.
+- **dpkg dependency drift on mismatched build / target**: if the
+  build box and the offline target diverge enough that the bundled
+  .debs reference transitive deps the target doesn't have, dpkg
+  leaves half-configured packages and `apt-get install -f` can't fix
+  it (it would need to fetch the missing deps from the network, which
+  is exactly what's not available). When this happens, `install-shell.sh`
+  prints a 3-paragraph diagnostic pointing at:
+  - `sudo dpkg --audit` and `dpkg -l | grep -E '^iU|^iF'` to inspect
+    the half-installed state,
+  - `sudo tail -50 /tmp/install-shell-dpkg.log` for the raw dpkg output,
+  and three resolution paths (rebuild bundle to match target, copy
+  missing .debs in manually, or get the target online briefly so
+  `apt-get install -f -y` can complete).
+- `provision-server.sh` (remote-via-SSH path) does not currently
+  support `--offline`. Workaround: rsync the dotfiles dir + bundle
+  to the offline server, then SSH in and run `install-shell.sh
+  --offline` locally there.
+
 #### `local_setup.sh` vs `vm_automation.py` — feature parity
 
 `vm_automation.py` is the older of the two scripts and is purpose-built
@@ -113,21 +327,38 @@ Practical guidance: **on a physical laptop or desktop, run
 target is a remote VM where most of those gaps don't apply (no GPU
 driver, no GRUB, no LVFS firmware updates).
 
-#### First-boot on a laptop (X11 vs Wayland)
+#### First-boot — picking i3 vs Plasma
 
-This stack is **X11-only by design** (i3 + picom + feh + i3lock).
-Debian 13's default desktop session — GNOME 48 — boots Wayland on
-capable hardware (most modern Intel and AMD iGPUs). After the install
-completes and `lightdm` starts:
+The repo ships **two** desktop stacks. Pick one per machine with the
+`--desktop=` flag at install time:
 
-1. At the lightdm greeter, click the gear / session-picker icon.
-2. Select **`i3`** as the session.
-3. Log in. Lightdm remembers the choice for subsequent logins.
+- **`--desktop=i3`** (default) — X11 + i3 + polybar + picom + rofi + dunst
+  + lightdm + pulseaudio. The original cyberpunk stack. Use on laptops,
+  iGPU machines, and anywhere you want minimal overhead and full
+  keyboard-driven control. Behaviour is byte-identical to pre-Plasma
+  versions of this script.
+- **`--desktop=plasma`** — KDE Plasma 6 on Wayland + KWin + SDDM +
+  PipeWire + konsole/dolphin/kscreenlocker. Recommended for **physical
+  desktops with discrete NVIDIA cards and multi-monitor / high-refresh
+  setups**, where Wayland's mixed-refresh-rate handling is the headline
+  win. See [`readme/plasma.md`](readme/plasma.md) for the full details
+  including NVIDIA-on-Wayland kernel pieces, theming layers, and
+  multi-monitor configuration.
 
-If you want a Wayland-native stack on the laptop (sway, Hyprland, …),
-this repo does **not** configure it — that is a parallel project. Pick
-one path per machine; do not try to mix X11 i3 and a Wayland compositor
-on the same user account.
+After install completes:
+
+- i3 path: lightdm greeter → pick `i3` session → log in. Lightdm
+  remembers the choice for subsequent logins.
+- plasma path: sddm greeter → `Plasma (Wayland)` is the default
+  session, click *Log in*. SDDM persists the choice.
+
+You can switch between stacks on the same machine by re-running
+`./local_setup.sh setup --i3` or `… --plasma`; the deploy phase
+swaps the active DM and patches the conky window-type accordingly.
+Both desktops' configs coexist on disk after either install. Do not
+log into BOTH stacks under the same user account during the same boot
+— some daemons (kwallet vs gnome-keyring, knotifications vs dunst)
+will fight for the same dbus name.
 
 #### First-boot hygiene (out of scope for the script, worth doing once)
 
@@ -221,14 +452,58 @@ After `setup` works, flip from "permissive install posture" to a
 hardened daily-use posture:
 
 ```bash
-./local_setup.sh harden          # sudo narrowing, ufw, auto-security-updates, DoT DNS
+./local_setup.sh harden          # sudo narrowing, ufw, DoT DNS, auto-security-updates, auditd
 ./local_setup.sh unharden        # revert (run before re-running setup)
 ```
+
+`harden` now wires up three additional layers alongside the sudoers /
+ufw pieces:
+
+- **unattended-upgrades — Debian-Security only.** The dropped
+  `50unattended-upgrades` allowlists *only* `Debian-Security` origins,
+  so daily auto-installs cover CVEs without silently pulling
+  point-release feature changes underneath you. Reverts cleanly via
+  `unharden`.
+- **auditd rules** — `config/system/etc/audit/rules.d/dotfiles.rules`
+  watches writes to `/etc/{passwd,shadow,group,gshadow}` and
+  `/etc/sudoers*`, kernel module load/unload (b64 + b32), and
+  mount/umount. Query with `sudo ausearch -k identity|sudoers|modules|mount`.
+- **DNS-over-TLS via systemd-resolved** (`harden_dot`, replaces the
+  older `harden_dns` path). Installs `systemd-resolved` if missing,
+  drops `config/system/etc/systemd/resolved.conf.d/cyberpunk-dot.conf`
+  (`DNSOverTLS=opportunistic`, `DNSSEC=allow-downgrade`, Cloudflare +
+  Quad9 with SNI hints, Google `8.8.8.8` as plain fallback), drops
+  `config/system/etc/NetworkManager/conf.d/cyberpunk-dns.conf`
+  (`dns=systemd-resolved`), atomically symlinks
+  `/etc/resolv.conf → /run/systemd/resolve/stub-resolv.conf` (running
+  `chattr -i` first in case an older hardening guide pinned it
+  immutable), and reloads NM. `unharden_dot` is the exact inverse.
+  Opportunistic mode keeps captive portals working at the cost of
+  RST-downgradability — the conky DoT row tells you when you've been
+  downgraded.
 
 Same on the remote-VM side: `python3 vm_automation.py harden`. Read
 [`readme/security.md`](readme/security.md) for the threat model, what
 each step changes, and what's still on you (disk encryption, Mullvad
-account creds, browser hardening).
+account creds, browser hardening), and [`readme/system.md`](readme/system.md)
+→ "Hardening extras" for the unattended-upgrades + auditd `ausearch`
+recipes.
+
+### Per-host overrides (`~/.config/dotfiles-local/`)
+
+Anything you drop under `~/.config/dotfiles-local/<thing>/…` is
+rsync'd OVER the repo defaults during `deploy_phase` (no `--delete`,
+so overrides only add/replace — they never strip repo files).
+This is the seam for machine-specific tweaks that don't belong in git
+(`alacritty.toml` font size on a 4K monitor, an extra polybar module,
+a `tmux.conf` snippet for one box). On first install the deploy phase
+auto-writes a short README to `~/.config/dotfiles-local/README`
+explaining the convention.
+
+```bash
+./local_setup.sh --show-overrides   # list [add]/[override]/[same]/[extra] entries
+DOTFILES_NO_LOCAL=1 ./local_setup.sh deploy   # one-shot bypass for a clean repo deploy
+```
 
 ---
 
@@ -360,12 +635,39 @@ of the box. Desktops without those keys can use the `Mod+F-row` fallback.
 | [wallpaper](readme/wallpaper.md)       | Procedural cyberpunk wallpaper generator             |
 | [lockscreen](readme/lockscreen.md)     | i3lock + neon overlay generator                      |
 | [fzf](readme/fzf.md)                   | Fuzzy finder — keybinds, integrations, recipes       |
-| [cli-tools](readme/cli-tools.md)       | bat, grc, ripgrep, fd, htop, fastfetch, lm-sensors   |
+| [cli-tools](readme/cli-tools.md)       | bat, grc, ripgrep, fd, htop, btop, fastfetch, lm-sensors |
 | [conky](readme/conky.md)               | Desktop hardware monitor                             |
 | [vpn](readme/vpn.md)                   | Mullvad + WireGuard — install, polybar, kill switch  |
 | [security](readme/security.md)         | Threat model, harden/unharden, what's still on you   |
 | [system](readme/system.md)             | Audio, brightness, clipboard, network, screenshots   |
 | [nix](readme/nix.md)                   | Nix package manager (apt-default, Nix-opt-in model)  |
+
+The `scripts/` directory holds smaller utilities that don't have their
+own page yet. The most-used ones, with one-line summaries:
+
+| Script                                | What it does                                                          |
+|---------------------------------------|-----------------------------------------------------------------------|
+| `scripts/provision-server.sh`         | Shell-only install on a remote server over SSH (Debian/Ubuntu/RHEL family). See README install path **C**. |
+| `scripts/install-shell.sh`            | Shell-only install on THIS machine. `--offline` consumes the bundle from `build-bundle.sh`. |
+| `scripts/build-bundle.sh`             | Builds `bundle/` (apt .debs + git clones + starship tarball) on a connected box for offline installs. `BUNDLE_SIGNING_KEY=<keyid>` emits a detached GPG signature over `manifest.sha256`. |
+| `scripts/audit.sh`                    | "Did anything change since I last ran this?" — diffs the current ports / kernel modules / critical-file hashes / SUID inventory against the baselines under `~/.config/conky/baseline-*.txt`. Flags: `--json`, `--refresh-baseline <name>`. Exit 0 OK / non-zero BAD — cron-friendly. Drift semantics intentionally match `health.py`'s same-named checks. |
+| `scripts/dotfiles-doctor.sh`          | One-page workstation health report (DRIFT + SYSTEM + NETWORK + DEPLOY sections); the standalone counterpart to the conky HEALTH panel. Shells out to `audit.sh` for the drift block. Flags: `--brief`, `--no-color`. Nagios-style exit codes (0 OK / 1 WARN / 2 BAD). |
+| `scripts/take-over-wifi.sh`           | Hands wifi from ifupdown / iwd / wpa_supplicant / systemd-networkd to NetworkManager — pre-imports SSID/PSK from `/etc/network/interfaces` into NM before stopping the old backend so reconnect is automatic. Run by `local_setup.sh setup` automatically when applicable; can also be invoked by hand. `--revert` undoes the takeover (restores the most recent `/etc/network/interfaces.bak.<TS>`, removes the NM conf.d snippet, re-enables the prior backend). |
+| `scripts/diagnose-wifi.sh`            | Read-only diagnostic dump for "wifi isn't working". Redacts wpa-psk / wpa-passphrase / wpa-password / wpa-preshared-key / wpa-wep-key* / wpa-eappsk / wpa-identity / wpa-anonymous-identity / wpa-private-key* / wpa-pin and replaces wpa-passphrase-file / wpa-psk-file paths with `<REDACTED-PATH>`. Safe to paste into a bug report. |
+
+### System hooks deployed under `config/system/`
+
+`deploy_phase` lays down a small set of root-owned hooks, each gated so
+it's a silent no-op when the host can't use it:
+
+| Source (in repo)                                                             | Deployed to                                                | Gated on                          | What it does |
+|------------------------------------------------------------------------------|------------------------------------------------------------|-----------------------------------|--------------|
+| `config/system/usr/lib/systemd/system-sleep/cyberpunk-suspend.sh`            | same path under `/`                                        | DMI chassis 8/9/10/14 (laptops)   | L2 — snapshots connected outputs pre-suspend, restarts `plasma-kscreen.service` on resume when outputs went missing (the T14 dock + Wayland re-enumerate bug). Journal tag `cyberpunk-suspend`. |
+| `config/system/usr/local/bin/cyberpunk-dock-handler.sh` + `config/system/etc/udev/rules.d/95-cyberpunk-dock.rules` | same paths under `/`                                       | DMI chassis 8/9/10/14 (laptops)   | L6 — udev rule (Lenovo TB4 Dock Gen 1, `17ef:3082`; commented templates for other Lenovo docks + a broad-USB-hub escape hatch) fires the handler under `systemd-run --no-block --collect`. First plug learns the current layout to `~/.config/dotfiles/dock-layouts/<hash>.json`, subsequent plugs restore it; unplug falls back to internal-panel-only. Journal tag `cyberpunk-dock`. |
+| `config/system/etc/environment.d/95-nvidia-wayland.conf`                     | same path under `/`                                        | `GPU_VENDOR=nvidia`               | D1 — sets `__GL_GSYNC_ALLOWED=1`, `__GL_VRR_ALLOWED=1`, `WLR_NO_HARDWARE_CURSORS=1`, `MOZ_ENABLE_WAYLAND=1`. Read by `pam_systemd` at graphical-session start; logout/login required. |
+| (no file — `kwriteconfig6` writes `~/.config/kwinrc`)                        | `~/.config/kwinrc` `[Wayland] EnableExplicitSync=true`     | `--plasma` + `GPU_VENDOR=nvidia`  | D2 — opt-in for KWin 6.1.x; a documented no-op on 6.2+ where the protocol is already default-on with NVIDIA 555+. Always-write, no version-detection. |
+| `config/plasma/kscreen-baseline.py`                                          | `~/.config/plasma/kscreen-baseline.py`                     | plasma + `kscreen-doctor` present | D3/D7/D8 — per-monitor mode + VRR + HDR baseline driver. CLI: `--snapshot` (capture current state to `~/.config/dotfiles/kscreen-baseline.json`, per-machine, NOT in repo), `apply` (default; silent no-op when no baseline), `--show`, `--reset`, `--enable-hdr <output>`, `--disable-hdr <output>`. `apply-theme.sh` calls `apply` after scale enforcement, then compares connected-output count to the baseline and `qdbus6 /KWin reconfigure`s on shortage; cross-machine baselines (different `machine_id`) skip recovery rather than locking it out. |
+| `config/system/etc/systemd/resolved.conf.d/cyberpunk-dot.conf` + `config/system/etc/NetworkManager/conf.d/cyberpunk-dns.conf` | same paths under `/`                                       | `--harden`                        | X6 — DNS-over-TLS via systemd-resolved (opportunistic, DNSSEC=allow-downgrade). `harden_dot()` replaces the older `harden_dns` path; the conky HEALTH `DoT` row tracks the live state. |
 
 ---
 
@@ -392,11 +694,21 @@ of the box. Desktops without those keys can use the `Mod+F-row` fallback.
 │   ├── lockscreen/lock.sh     ← lockscreen renderer
 │   ├── wallpaper/             ← Pillow wallpaper generator
 │   ├── lightdm/               ← display-manager greeter theme (TEMPLATE: *.conf.in with @HOME@)
+│   ├── plasma/                ← Plasma 6 / Wayland configs + apply-theme.sh + kscreen-baseline.py
+│   ├── sddm/                  ← SDDM greeter theming
+│   ├── system/                ← root-owned drop-ins (suspend hook, dock udev, NVIDIA env, resolved DoT, NM)
 │   ├── gtk-2.0/, gtk-3.0/     ← GTK theme overrides
 │   └── xorg.conf.d/           ← Hyper-V Xorg config
 └── scripts/
     ├── xsession.sh            ← deployed to ~/.xsession
-    └── Xresources             ← deployed to ~/.Xresources
+    ├── Xresources             ← deployed to ~/.Xresources
+    ├── provision-server.sh    ← shell-only setup of a remote server over SSH
+    ├── install-shell.sh       ← shell-only setup of THIS machine (online or --offline)
+    ├── build-bundle.sh        ← builds bundle/ for `install-shell.sh --offline`
+    ├── audit.sh               ← drift-diff vs ~/.config/conky/baseline-*.txt (cron-friendly)
+    ├── dotfiles-doctor.sh     ← one-page health report (DRIFT / SYSTEM / NETWORK / DEPLOY)
+    ├── take-over-wifi.sh      ← hands wifi from ifupdown/iwd/wpa_supplicant to NM (--revert undoes)
+    └── diagnose-wifi.sh       ← read-only wifi diagnostic dump (PSK-redacted)
 ```
 
 ---
