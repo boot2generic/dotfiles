@@ -25,8 +25,12 @@
 #   6. Restarts NetworkManager.
 #   7. Prompts for SSID + password, then `nmcli device wifi connect`.
 #
-# Reversal: see readme/system.md → "WiFi shows 'unmanaged'" for the
-# rollback steps (rm the conf.d file, re-enable the previous backend).
+# Reversal: pass --revert.  Restores the most recent set of backup
+# files written by a prior takeover (or prompts for a generation if
+# multiple exist), removes our conf.d snippet, re-enables whichever
+# backend (wpa_supplicant / iwd / ifupdown) was running before, and
+# restarts NetworkManager.  See readme/system.md → "WiFi shows
+# 'unmanaged'" for the manual equivalent.
 
 set -euo pipefail
 
@@ -44,7 +48,21 @@ err()  { echo "${C_ERR}[!!]${C_RST} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
 YES=0
-[[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && YES=1
+REVERT=0
+# Accept --yes / -y and --revert in either order.  Keep the loop tiny
+# rather than reaching for getopts — only two flags and existing code
+# assumed a single optional arg.
+for _arg in "$@"; do
+    case "$_arg" in
+        --yes|-y)  YES=1 ;;
+        --revert)  REVERT=1 ;;
+        -h|--help)
+            sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "Unknown flag: $_arg" >&2; exit 2 ;;
+    esac
+done
+unset _arg
 
 confirm() {
     (( YES )) && return 0
@@ -53,9 +71,202 @@ confirm() {
     [[ "${ans:-}" =~ ^[Yy] ]]
 }
 
+# ── nm_write_psk_profile: create a .nmconnection file with PSK on disk only ──
+# Args: <profile_name> <wifi_iface> <ssid> <psk>
+# Writes /etc/NetworkManager/system-connections/<profile>.nmconnection (mode
+# 0600 owned by root) then `nmcli connection reload`s.  The PSK NEVER appears
+# on any process argv: `printf` is a bash builtin (no fork/exec) and `install`
+# only sees `/dev/stdin` as its file argument.  The alternative —
+# `nmcli connection add … wifi-sec.psk "$PSK"` — leaks the PSK via
+# `ps`/`/proc/<pid>/cmdline` for the lifetime of the nmcli call.
+#
+# Returns 0 on success, non-zero on failure (and removes the partial file).
+nm_write_psk_profile() {
+    local profile="$1" iface="$2" ssid="$3" psk="$4"
+    local path="/etc/NetworkManager/system-connections/${profile}.nmconnection"
+    local uuid
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuid="$(uuidgen)"
+    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+        uuid="$(cat /proc/sys/kernel/random/uuid)"
+    else
+        warn "no uuidgen and /proc/sys/kernel/random/uuid unreadable"
+        return 1
+    fi
+    if {
+        printf '[connection]\nid=%s\nuuid=%s\ntype=wifi\ninterface-name=%s\nautoconnect=true\n\n' \
+            "$profile" "$uuid" "$iface"
+        printf '[wifi]\nmode=infrastructure\nssid=%s\n\n' "$ssid"
+        printf '[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n' "$psk"
+        printf '[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n'
+    } | sudo install -m 0600 -o root -g root /dev/stdin "$path" \
+       && sudo nmcli connection reload >/dev/null 2>&1; then
+        return 0
+    fi
+    sudo rm -f "$path" 2>/dev/null || true
+    return 1
+}
+
 # ── Sanity ─────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] && die "Run as a regular user — sudo will be invoked where needed."
 command -v nmcli >/dev/null 2>&1 || die "nmcli not installed — run \`sudo apt install network-manager\`"
+
+# ── --revert: undo a prior takeover ────────────────────────────────
+# Why a dedicated branch this early in the script: the rest of the
+# script probes NM device state and exits if the iface is already
+# NM-managed — which is exactly the state we expect a user reverting
+# FROM.  Handle revert before any of that.
+if (( REVERT )); then
+    NM_CONF=/etc/NetworkManager/conf.d/10-globally-managed-devices.conf
+
+    # Discover every distinct timestamp suffix across interfaces +
+    # interfaces.d/ in one pass.  We use the suffix (not the path) so a
+    # user reverting in one shot gets BOTH the parent file and any
+    # split-out interfaces.d/* fragments restored together.
+    declare -a TS_LIST=()
+    while IFS= read -r ts; do
+        [[ -n "$ts" ]] && TS_LIST+=("$ts")
+    done < <(
+        {
+            ls -1 /etc/network/interfaces.bak.* 2>/dev/null || true
+            ls -1 /etc/network/interfaces.d/*.bak.* 2>/dev/null || true
+        } | sed -nE 's/.*\.bak\.([0-9]{8}-[0-9]{6})$/\1/p' \
+          | sort -ru
+    )
+
+    if (( ${#TS_LIST[@]} == 0 )) && [[ ! -f "$NM_CONF" ]]; then
+        log "No backup files under /etc/network/ and no $NM_CONF —"
+        log "nothing to revert.  (Has this script ever been run here?)"
+        exit 0
+    fi
+
+    # Pick a generation.  --yes auto-selects the newest (sort -ru above
+    # already put it first); otherwise prompt only if there's ambiguity.
+    CHOSEN_TS=""
+    if (( ${#TS_LIST[@]} == 1 )); then
+        CHOSEN_TS="${TS_LIST[0]}"
+    elif (( ${#TS_LIST[@]} > 1 )); then
+        if (( YES )); then
+            CHOSEN_TS="${TS_LIST[0]}"
+            log "Multiple backup generations found; --yes → using newest: $CHOSEN_TS"
+        else
+            echo "Multiple backup generations found:"
+            local_i=1
+            for ts in "${TS_LIST[@]}"; do
+                echo "  [$local_i] $ts$([[ "$ts" == "${TS_LIST[0]}" ]] && echo '  (newest)')"
+                local_i=$((local_i + 1))
+            done
+            read -rp "Pick a generation [1-${#TS_LIST[@]}] (default 1): " sel
+            sel="${sel:-1}"
+            if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#TS_LIST[@]} )); then
+                die "Invalid selection: $sel"
+            fi
+            CHOSEN_TS="${TS_LIST[$((sel - 1))]}"
+            unset local_i sel
+        fi
+    fi
+
+    if [[ -n "$CHOSEN_TS" ]]; then
+        log "Reverting backup generation: $CHOSEN_TS"
+        confirm "Restore /etc/network/interfaces* from .bak.${CHOSEN_TS}?" \
+            || { log "Aborted."; exit 0; }
+
+        # Restore by moving (not copying) — backups are consumed.  This
+        # matches the "one revert per generation" semantics and avoids
+        # leaving stale .bak files around that confuse the next revert.
+        if [[ -f "/etc/network/interfaces.bak.${CHOSEN_TS}" ]]; then
+            sudo mv "/etc/network/interfaces.bak.${CHOSEN_TS}" /etc/network/interfaces \
+                && ok "restored /etc/network/interfaces"
+        fi
+        # Each interfaces.d/<file>.bak.TS restores back to <file>.
+        shopt -s nullglob
+        for bak in /etc/network/interfaces.d/*.bak."${CHOSEN_TS}"; do
+            orig="${bak%.bak.${CHOSEN_TS}}"
+            sudo mv "$bak" "$orig" \
+                && ok "restored $orig"
+        done
+        shopt -u nullglob
+    else
+        warn "No /etc/network/interfaces*.bak.* files found — skipping restore"
+    fi
+
+    # Remove our managed=true override.  Its own comment header says
+    # "Remove this file to revert" — do exactly that.
+    if [[ -f "$NM_CONF" ]]; then
+        sudo rm -f "$NM_CONF" \
+            && ok "removed $NM_CONF"
+    else
+        log "$NM_CONF already absent"
+    fi
+
+    # Pre-imported NM profiles ("ifupdown-import-*") will conflict with
+    # ifupdown reclaiming the iface.  Offer to delete; default yes under
+    # --yes, prompt otherwise.
+    declare -a NM_IMPORTED=()
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && NM_IMPORTED+=("$name")
+    done < <(nmcli -t -f NAME connection show 2>/dev/null \
+             | grep -E '^ifupdown-import-' || true)
+    if (( ${#NM_IMPORTED[@]} > 0 )); then
+        log "Found pre-imported NM profiles from takeover:"
+        for n in "${NM_IMPORTED[@]}"; do log "  • $n"; done
+        if confirm "Delete these NM profiles?"; then
+            for n in "${NM_IMPORTED[@]}"; do
+                sudo nmcli connection delete "$n" >/dev/null 2>&1 \
+                    && ok "deleted NM profile: $n" \
+                    || warn "couldn't delete NM profile: $n"
+            done
+        else
+            warn "Leaving NM profiles in place — they may fight ifupdown for the iface"
+        fi
+    fi
+
+    # Figure out which backend to bring back.  Heuristic ordering:
+    #   1. /etc/wpa_supplicant/wpa_supplicant-<iface>.conf → wpa_supplicant
+    #   2. anything under /var/lib/iwd/                    → iwd
+    #   3. otherwise → ifupdown only (now that interfaces is restored)
+    # If none of these match, don't guess — tell the user what to do.
+    REVERT_IFACE="$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
+                    | awk -F: '$2 == "wifi" {print $1; exit}' || true)"
+    [[ -z "$REVERT_IFACE" ]] && REVERT_IFACE="wlan0"
+
+    chose_backend=""
+    if [[ -f "/etc/wpa_supplicant/wpa_supplicant-${REVERT_IFACE}.conf" ]]; then
+        chose_backend="wpa_supplicant@${REVERT_IFACE}"
+    elif [[ -d /var/lib/iwd ]] && \
+         find /var/lib/iwd -maxdepth 1 -type f \( -name '*.psk' -o -name '*.open' -o -name '*.8021x' \) \
+              2>/dev/null | grep -q .; then
+        chose_backend="iwd"
+    fi
+
+    if [[ -n "$chose_backend" ]]; then
+        log "Re-enabling previous backend: $chose_backend"
+        sudo systemctl enable --now "$chose_backend" >/dev/null 2>&1 \
+            && ok "$chose_backend enabled + started" \
+            || warn "couldn't start $chose_backend — check \`systemctl status $chose_backend\`"
+    else
+        warn "Couldn't detect a previous wifi backend automatically."
+        warn "If you used ifupdown alone (wpa-ssid in /etc/network/interfaces),"
+        warn "the restore above is enough — \`sudo ifup $REVERT_IFACE\` should work."
+        warn "Otherwise re-enable manually, e.g.:"
+        warn "  sudo systemctl enable --now wpa_supplicant"
+        warn "  sudo systemctl enable --now iwd"
+        warn "  sudo systemctl enable --now systemd-networkd"
+    fi
+
+    # Restart NM regardless — we just yanked its conf.d snippet and may
+    # have left it with a now-stale view of the iface.
+    log "restarting NetworkManager …"
+    sudo systemctl restart NetworkManager >/dev/null 2>&1 || true
+
+    echo
+    ok "Revert complete."
+    log "Verify with:"
+    log "  ip a show $REVERT_IFACE"
+    log "  ping -c1 \$(ip route show default | awk '{print \$3}')"
+    log "  systemctl status ${chose_backend:-NetworkManager}"
+    exit 0
+fi
 
 # ── Detect the wifi interface ──────────────────────────────────────
 WIFI_IFACE="$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
@@ -121,26 +332,39 @@ confirm "Proceed with takeover for $WIFI_IFACE?" \
 INTERFACES_SSID=""
 INTERFACES_PSK=""
 if [[ -r /etc/network/interfaces ]]; then
-    # Look in the iface block whose interface name matches WIFI_IFACE.
-    # awk reads the file once, tracks whether we're inside the right
-    # block, and emits SSID + PSK as `KEY=VALUE` shell-quoted lines.
-    eval "$(sudo awk -v IF="$WIFI_IFACE" '
-        BEGIN { in_block=0 }
+    # Parse the matching `iface <WIFI_IFACE>` block for SSID + PSK.
+    #
+    # The original implementation `eval`d shell-quoted awk output, which
+    # only escaped literal apostrophes — a credential containing `$(...)`
+    # or backticks would have executed as shell.  We now emit NUL-
+    # delimited `key\tvalue\0` records and consume them via bash `read`,
+    # which treats every byte (including $, `, ", \) as a literal — no
+    # shell expansion ever sees the secret.
+    while IFS=$'\t' read -r -d '' _key _val; do
+        case "$_key" in
+            ssid) INTERFACES_SSID="$_val" ;;
+            psk)  INTERFACES_PSK="$_val"  ;;
+        esac
+    done < <(sudo awk -v IF="$WIFI_IFACE" '
+        BEGIN { in_block = 0 }
         /^[[:space:]]*iface[[:space:]]+/ {
             in_block = ($2 == IF) ? 1 : 0
             next
         }
         in_block && /^[[:space:]]*wpa-ssid[[:space:]]+/ {
-            sub(/^[[:space:]]*wpa-ssid[[:space:]]+/, "")
-            gsub(/'\''/, "'\''\\'\'\''")   # shell-escape any literal apostrophes
-            print "INTERFACES_SSID='\''" $0 "'\''"
+            v = $0
+            sub(/^[[:space:]]*wpa-ssid[[:space:]]+/, "", v)
+            sub(/^"/, "", v); sub(/"$/, "", v)
+            printf "ssid\t%s\0", v
         }
         in_block && /^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+/ {
-            sub(/^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+/, "")
-            gsub(/'\''/, "'\''\\'\'\''")
-            print "INTERFACES_PSK='\''" $0 "'\''"
+            v = $0
+            sub(/^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+/, "", v)
+            sub(/^"/, "", v); sub(/"$/, "", v)
+            printf "psk\t%s\0", v
         }
-    ' /etc/network/interfaces 2>/dev/null)"
+    ' /etc/network/interfaces 2>/dev/null)
+    unset _key _val
 fi
 
 if [[ -n "$INTERFACES_SSID" && -n "$INTERFACES_PSK" ]]; then
@@ -152,17 +376,13 @@ if [[ -n "$INTERFACES_SSID" && -n "$INTERFACES_PSK" ]]; then
          | grep -Fxq "$PROFILE_NAME"; then
         log "  profile $PROFILE_NAME already exists — leaving it"
     else
-        sudo nmcli connection add \
-            type wifi \
-            con-name "$PROFILE_NAME" \
-            ifname "$WIFI_IFACE" \
-            ssid "$INTERFACES_SSID" \
-            wifi-sec.key-mgmt wpa-psk \
-            wifi-sec.psk "$INTERFACES_PSK" \
-            connection.autoconnect yes \
-            >/dev/null \
-            && ok "imported as NM profile: $PROFILE_NAME" \
-            || warn "nmcli connection add failed — will fall back to interactive prompt"
+        if nm_write_psk_profile "$PROFILE_NAME" "$WIFI_IFACE" \
+                                "$INTERFACES_SSID" "$INTERFACES_PSK"; then
+            ok "imported as NM profile: $PROFILE_NAME (file mode 0600)"
+        else
+            warn "nmconnection write failed — falling back to interactive prompt"
+        fi
+        unset INTERFACES_PSK
     fi
 else
     warn "Couldn't extract SSID/PSK from /etc/network/interfaces."
@@ -319,6 +539,22 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
     warn "Imported profile failed — falling back to interactive prompt."
 fi
 
+# `--yes` (auto_wifi_takeover from local_setup.sh's setup action runs
+# this) means there's no human at the keyboard.  If we got HERE, the
+# pre-import did NOT produce a working connection — and we can't ask
+# the user for a password from a non-interactive context.  Bail with a
+# clear error pointing at the manual recovery path rather than block
+# on `read` until the SSH session times out.
+if (( YES )); then
+    err "Pre-import didn't reconnect and we're in --yes mode (no stdin)."
+    err "Network is now in a transitional state (NM owns the device but"
+    err "no profile is active).  Recover with one of:"
+    err "  • Re-run interactively:    $0          # without --yes"
+    err "  • Restore the prior backend: see readme/system.md → 'WiFi shows unmanaged'"
+    err "  • Manual nmcli:            nmcli device wifi connect 'SSID' password 'PW'"
+    exit 1
+fi
+
 echo
 log "Now connect to your wifi.  Three options:"
 log "  (1) Enter SSID + password here"
@@ -341,7 +577,36 @@ if [[ -z "$PW" ]]; then
     log "Empty password — assuming open network."
     sudo nmcli device wifi connect "$SSID"
 else
-    sudo nmcli device wifi connect "$SSID" password "$PW"
+    # Write the .nmconnection file directly so the PSK never appears on
+    # argv (`nmcli device wifi connect … password "$PW"` would leak it
+    # via `ps` / `/proc/<pid>/cmdline` for the lifetime of the call).
+    # Caveat: the file we write hardcodes `key-mgmt=wpa-psk`, which does
+    # NOT cover WPA3-Personal (which needs `key-mgmt=sae`).  If
+    # `nmcli connection up` fails — likely on a pure WPA3 AP, or on a
+    # PSK typo — we delete the partial profile and fall back to
+    # `nmcli device wifi connect` (which auto-detects key-mgmt from
+    # the scan results).  That fallback briefly puts the PSK on argv,
+    # but trading a few-ms ps-visible secret for "can't connect at all"
+    # is the right call on a user-driven interactive prompt.
+    INTERACTIVE_PROFILE="${SSID}"
+    _used_argv_fallback=0
+    if nm_write_psk_profile "$INTERACTIVE_PROFILE" "$WIFI_IFACE" "$SSID" "$PW"; then
+        ok "profile written to /etc/NetworkManager/system-connections/${INTERACTIVE_PROFILE}.nmconnection"
+        if sudo nmcli connection up "$INTERACTIVE_PROFILE" >/dev/null; then
+            ok "connected to '$SSID'"
+        else
+            warn 'profile up failed — likely WPA3 AP (SAE) or PSK typo; falling back to nmcli auto-detect'
+            sudo nmcli connection delete "$INTERACTIVE_PROFILE" >/dev/null 2>&1 || true
+            _used_argv_fallback=1
+        fi
+    else
+        warn 'couldn'"'"'t write nmconnection file — falling back to plain nmcli (PSK briefly on argv)'
+        _used_argv_fallback=1
+    fi
+    if (( _used_argv_fallback )); then
+        sudo nmcli device wifi connect "$SSID" password "$PW"
+    fi
+    unset PW _used_argv_fallback
 fi
 
 ok "Done.  Polybar wlan pill should render in the next few seconds."

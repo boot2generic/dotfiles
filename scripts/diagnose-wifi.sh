@@ -150,7 +150,19 @@ fi
 # treated as fully compromised and have to be rotated on the AP, so
 # we go out of our way to never include them in the diagnostic dump.
 redact_iface_secrets() {
-    sed -E 's/^([[:space:]]*(wpa-(psk|passphrase|password|preshared-key|wep-key[0-9]?))[[:space:]]+).*/\1<REDACTED>/'
+    # ifupdown supports a long list of `wpa-*` directives, several of
+    # which carry sensitive material.  An earlier version of this
+    # function listed them individually (psk, passphrase, password,
+    # preshared-key, wep-key[0-9]?) and missed eappsk, identity,
+    # private-key-passwd, etc.  We now redact ANY wpa-* directive
+    # whose name suggests secret content.  False positives (e.g.,
+    # wpa-driver = "nl80211") are explicitly excluded.
+    sed -E '
+        # Things that look secret-bearing — redact the value.
+        s/^([[:space:]]*wpa-(psk|passphrase|password|preshared-key|wep-key[0-9]?|eappsk|private-key|private-key-passwd|private-key2|private-key-passwd2|identity|anonymous-identity|pin)[[:space:]]+).*/\1<REDACTED>/
+        # Per-IEEE8021X password files (path may leak; truncate value).
+        s/^([[:space:]]*wpa-(passphrase-file|psk-file)[[:space:]]+).*/\1<REDACTED-PATH>/
+    '
 }
 section "9. /etc/network/interfaces*"
 if [[ -f /etc/network/interfaces ]]; then
@@ -174,13 +186,44 @@ ls /run/systemd/network/ 2>/dev/null \
   | grep -v '^total' || echo "(/run/ also empty)"
 
 # ── 11. wpa_supplicant config (if any) ────────────────────
+# Mirror the ifupdown redactor (above) for the wpa_supplicant.conf
+# keyfile syntax (`key=value`, not `wpa-key value`).  The previous
+# implementation used a narrow blocklist `grep -vE "psk=|password=|
+# ext_password="` which silently leaked WEP keys, EAP passwords,
+# private-key passphrases, machine PINs, and pac_file paths — all of
+# which can appear in real-world enterprise / legacy supplicant
+# configs.  This redactor keeps the line so structure is visible but
+# zeroes out the secret-bearing value, matching how `redact_iface_
+# secrets` handles /etc/network/interfaces.
+redact_supplicant_secrets() {
+    # Keys below are real wpa_supplicant.conf directives.  An earlier
+    # draft included a handful of names the security agent suggested
+    # that aren't actually directives (eap_pwd_password, machine_password,
+    # *_cert_blob, etc.) — harmless because they'd never match, but
+    # listing them was misleading.  Anything ending in `password` /
+    # `passwd` / `pass` is caught by the broad `.*pass.*` clause too.
+    sed -E '
+        # Secret-bearing values — replace the RHS with <REDACTED>.
+        s/^([[:space:]]*(psk|passphrase|password|ext_password|ext_psk|wep_key[0-9]?|wep_tx_keyidx|pin|sim_num|private_key_passwd|private_key2_passwd|new_password)[[:space:]]*=[[:space:]]*).*/\1<REDACTED>/
+        # Defence in depth: redact any directive whose name contains
+        # `pass` (catches future / vendor-specific `*_password`,
+        # `passwd`, `pass_phrase` variants we didn'\''t enumerate).
+        s/^([[:space:]]*[A-Za-z_][A-Za-z0-9_]*pass[A-Za-z0-9_]*[[:space:]]*=[[:space:]]*).*/\1<REDACTED>/
+        # File paths that may leak filesystem layout — truncate value.
+        s/^([[:space:]]*(pac_file|ca_path|ca_cert|client_cert|client_cert2|private_key|private_key2)[[:space:]]*=[[:space:]]*).*/\1<REDACTED-PATH>/
+    '
+}
 section "11. /etc/wpa_supplicant/"
 ls /etc/wpa_supplicant/ 2>/dev/null
 if sudo -n true 2>/dev/null; then
-    sudo grep -lE 'ssid' /etc/wpa_supplicant/* 2>/dev/null \
-      | head -3 \
-      | xargs -I {} sh -c 'echo; echo "--- {} (sanitised) ---"; sudo grep -vE "psk=|password=|ext_password=" {}' \
-      || true
+    # Iterate readable wpa_supplicant-*.conf files explicitly (instead of
+    # piping through xargs+sh -c, which lost stdin/stdout semantics and
+    # made it impossible to apply a function-based redactor).
+    while IFS= read -r f; do
+        echo
+        echo "--- $f (sanitised) ---"
+        sudo cat "$f" 2>/dev/null | redact_supplicant_secrets
+    done < <(sudo grep -lE '^[[:space:]]*ssid=' /etc/wpa_supplicant/*.conf 2>/dev/null | head -3)
 fi
 
 # ── 12. Recent NetworkManager journal ──────────────────────
