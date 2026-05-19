@@ -1,0 +1,27 @@
+[General]
+count=1
+rules=conky-desktop-pin
+
+[conky-desktop-pin]
+Description=Pin Conky to the desktop layer (cyberpunk dotfiles)
+above=false
+aboverule=2
+acceptfocus=false
+acceptfocusrule=2
+below=true
+belowrule=2
+desktops=
+desktopsrule=0
+noborder=true
+noborderrule=2
+skippager=true
+skippagerrule=2
+skipswitcher=true
+skipswitcherrule=2
+skiptaskbar=true
+skiptaskbarrule=2
+type=1
+typerule=2
+wmclass=Conky
+wmclasscomplete=false
+wmclassmatch=1

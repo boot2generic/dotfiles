@@ -1,0 +1,17 @@
+[Desktop Entry]
+DefaultProfile=CyberpunkCyan.profile
+
+[KonsoleWindow]
+RememberWindowSize=false
+ShowMenuBarByDefault=false
+ShowWindowTitleOnTitleBar=true
+
+[MainWindow]
+MenuBar=Disabled
+ToolBarsMovable=Disabled
+
+[TabBar]
+ExpandTabWidth=false
+NewTabBehavior=PutNewTabAfterCurrentTab
+TabBarPosition=Top
+TabBarVisibility=ShowTabBarWhenNeeded

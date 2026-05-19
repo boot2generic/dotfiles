@@ -1,0 +1,24 @@
+# kscreenlockerrc — KDE screen-locker daemon config.
+#
+# LockGrace=0: no post-lock dismissal window.  After the screen locks
+# (Autolock idle timer fires or LockOnResume triggers), password is
+# required immediately — no "tap any key within N seconds to dismiss"
+# escape.  Matches the rest of the dotfiles' security posture
+# (WireGuard 0600, narrow sudoers, zsh history 0600).
+#
+# Timeout=10 (minutes) — auto-lock kicks in 10 min after last input.
+
+[Daemon]
+Autolock=true
+LockGrace=0
+LockOnResume=true
+Timeout=10
+
+[Greeter]
+Theme=org.kde.breezedark.desktop
+WallpaperPlugin=org.kde.image
+
+[Greeter][Wallpaper][org.kde.image][General]
+FillMode=2
+Image=@HOME@/.config/wallpaper/wallpaper.png
+PreviewImage=@HOME@/.config/wallpaper/wallpaper.png

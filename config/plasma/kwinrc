@@ -1,0 +1,51 @@
+[Compositing]
+AllowTearing=true
+Backend=OpenGL
+Enabled=true
+HiddenPreviews=5
+WindowsBlockCompositing=true
+
+[Desktops]
+# Four virtual desktops, single row — mirrors the i3 workspace workflow
+# (Mod+1..4 to switch, Mod+Shift+1..4 to move-window-to).  Bindings live
+# in config/plasma/kglobalshortcutsrc.  Plasma persists per-desktop UUIDs
+# in `Id_N=<uuid>` keys, but it is happy to (re)generate them at runtime
+# if we only set Number+Rows here, so no UUID drift between machines.
+Number=4
+Rows=1
+
+[NightColor]
+Active=false
+
+[Plugins]
+blurEnabled=true
+contrastEnabled=true
+desktopgridEnabled=true
+diminactiveEnabled=false
+overviewEnabled=true
+slideEnabled=true
+zoomEnabled=true
+
+[Wayland]
+EnablePrimarySelection=true
+InputMethod=
+
+[Windows]
+BorderlessMaximizedWindows=false
+ElectricBorderCornerRatio=0.25
+ElectricBorders=0
+FocusPolicy=ClickToFocus
+NextFocusPrefersMouse=false
+RollOverDesktops=true
+SeparateScreenFocus=false
+
+[Xwayland]
+Scale=1
+
+[org.kde.kdecoration2]
+ButtonsOnLeft=
+ButtonsOnRight=IAX
+CloseOnDoubleClickOnMenu=false
+ShowToolTips=true
+library=org.kde.breeze
+theme=Breeze

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Conky (cyberpunk dotfiles)
+Comment=Desktop-pinned system stats overlay
+Exec=conky -d -c @HOME@/.config/conky/conky.conf
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-GNOME-Autostart-enabled=false
+StartupNotify=false
+Terminal=false

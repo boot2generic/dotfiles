@@ -1,0 +1,115 @@
+[ColorEffects:Disabled]
+Color=56,56,56
+ColorAmount=0
+ColorEffect=0
+ContrastAmount=0.65
+ContrastEffect=1
+Enable=
+IntensityAmount=0.1
+IntensityEffect=2
+
+[ColorEffects:Inactive]
+ChangeSelectionColor=true
+Color=112,111,170
+ColorAmount=0.025
+ColorEffect=2
+ContrastAmount=0.1
+ContrastEffect=2
+Enable=false
+IntensityAmount=0
+IntensityEffect=0
+
+[Colors:Button]
+BackgroundAlternate=18,18,31
+BackgroundNormal=26,26,46
+DecorationFocus=0,229,255
+DecorationHover=0,229,255
+ForegroundActive=0,229,255
+ForegroundInactive=136,136,204
+ForegroundLink=0,229,255
+ForegroundNegative=255,0,85
+ForegroundNeutral=255,204,0
+ForegroundNormal=226,226,255
+ForegroundPositive=0,255,65
+ForegroundVisited=255,0,204
+
+[Colors:Selection]
+BackgroundAlternate=0,229,255
+BackgroundNormal=0,229,255
+ForegroundActive=13,13,26
+ForegroundInactive=13,13,26
+ForegroundLink=13,13,26
+ForegroundNormal=13,13,26
+
+[Colors:Tooltip]
+BackgroundAlternate=18,18,31
+BackgroundNormal=13,13,26
+ForegroundNormal=226,226,255
+
+[Colors:View]
+BackgroundAlternate=18,18,31
+BackgroundNormal=13,13,26
+DecorationFocus=0,229,255
+ForegroundActive=0,229,255
+ForegroundInactive=136,136,204
+ForegroundLink=0,229,255
+ForegroundNegative=255,0,85
+ForegroundNeutral=255,204,0
+ForegroundNormal=226,226,255
+ForegroundPositive=0,255,65
+ForegroundVisited=255,0,204
+
+[Colors:Window]
+BackgroundAlternate=18,18,31
+BackgroundNormal=13,13,26
+DecorationFocus=0,229,255
+ForegroundActive=0,229,255
+ForegroundInactive=136,136,204
+ForegroundNormal=226,226,255
+
+[General]
+AccentColor=0,229,255
+ColorScheme=CyberpunkCyan
+LastUsedCustomAccentColor=0,229,255
+Name=Cyberpunk Cyan
+TerminalApplication=alacritty
+TerminalService=alacritty.desktop
+XftAntialias=true
+XftHintStyle=hintslight
+XftSubPixel=rgb
+fixed=JetBrainsMono Nerd Font,11,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular
+font=JetBrainsMono Nerd Font,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular
+menuFont=JetBrainsMono Nerd Font,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular
+smallestReadableFont=JetBrainsMono Nerd Font,8,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular
+toolBarFont=JetBrainsMono Nerd Font,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular
+
+[Icons]
+Theme=breeze-dark
+
+[KDE]
+AnimationDurationFactor=0.5
+ColorScheme=CyberpunkCyan
+LookAndFeelPackage=org.kde.breezedark.desktop
+ShowDeleteCommand=false
+SingleClick=false
+contrast=4
+
+[WM]
+# Title-bar background for the FOCUSED window.  Set to 13,13,26 ==
+# #0d0d1a — the EXACT background colour alacritty uses (see
+# config/alacritty/alacritty.toml [colors.primary] background).  When
+# alacritty has focus the bar visually melts into the terminal window;
+# you only see the 2 px cyan accent border (from activeBlend) framing
+# the whole thing.  If we leave this at the previous 8,8,16 the bar
+# is one shade darker than the terminal and reads as a separate slab.
+activeBackground=13,13,26
+# The thin coloured pen Breeze paints around the active window's
+# perimeter.  This is the "cyan outline" the user asked for; visibility
+# is governed by breezerc [Common] BorderSize (Normal = 2 px).
+activeBlend=0,229,255
+activeForeground=0,229,255
+# Inactive windows — slightly lighter than the active bg so the
+# focus state is still readable when several windows overlap.
+inactiveBackground=18,18,31
+inactiveBlend=85,85,170
+inactiveForeground=136,136,204

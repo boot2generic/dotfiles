@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Cyberpunk theme apply (cyberpunk dotfiles)
+Comment=Idempotently apply CyberpunkCyan color scheme + wallpaper at Plasma startup
+Exec=@HOME@/.config/plasma/apply-theme.sh
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-GNOME-Autostart-enabled=false
+StartupNotify=false
+Terminal=false

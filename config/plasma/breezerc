@@ -1,0 +1,81 @@
+# Breeze decoration + style config — cyberpunk dotfiles
+#
+# Deployed to: ~/.config/breezerc
+#
+# What this file controls
+# -----------------------
+# Plasma's window decorations are drawn server-side by KWin using the
+# Breeze decoration plugin.  Window TITLE BAR BACKGROUND COLOUR is
+# pulled from kdeglobals [WM] activeBackground / inactiveBackground.
+# The thin coloured LINE around the active window comes from
+# kdeglobals [WM] activeBlend.  This file controls everything ELSE —
+# border thickness, title alignment, button rendering, gradient fill,
+# shadow.
+#
+# Cyberpunk-cyan visual recipe
+# ----------------------------
+# The combination that produces the look the user asked for —
+# "transparent-feeling title bar with a cyan outline matching the rest
+# of the theme" — is:
+#
+#   kdeglobals [WM]  activeBackground = 13,13,26    (#0d0d1a, exact
+#                                                    match for
+#                                                    alacritty bg)
+#   kdeglobals [WM]  activeBlend      = 0,229,255   (#00e5ff cyan accent)
+#   breezerc  [Common] BorderSize      = Normal     (visible cyan band
+#                                                    around the active
+#                                                    window — Breeze
+#                                                    paints it from
+#                                                    activeBlend)
+#   alacritty.toml  opacity = 0.92                  (window body 8 %
+#                                                    transparent, blur
+#                                                    via KWin's blur
+#                                                    effect already on)
+#
+# True ALPHA-transparent title bars (rather than dark-matched-to-bg)
+# need a third-party decoration theme (Klassy, BreezeEnhanced,
+# BreezeBlurred — none of them packaged in Debian Trixie at time of
+# writing).  This config gets visually as close as stock Breeze can
+# manage; if the user wants real alpha, add the theme repo and switch
+# `library` in kdeglobals [org.kde.kdecoration2].
+
+[Common]
+# BorderSize controls how thick the coloured outline is around the
+# active window.  Options (Plasma 6 Breeze):
+#   None           — no resize handle, no coloured edge
+#   NoSides        — bottom edge only
+#   Tiny           — 1 px (default Breeze; barely visible)
+#   Normal         — 2 px (chosen — visible cyan accent on cyberpunk
+#                          dark bg without dominating the window)
+#   Large / VeryLarge / Huge / VeryHuge / Oversized — progressively
+#                                                     thicker
+BorderSize=Normal
+# Outline pen colour — KWin pulls this from [WM] activeBlend in
+# kdeglobals; this key is documentation-only here.
+OutlineColor=
+ShadowColor=0,0,0
+ShadowSize=ShadowMedium
+ShadowStrength=180
+
+[Style]
+# Don't paint a glassy gradient over the title bar — flat dark matches
+# the alacritty / conky / polybar palette exactly.  Gradient is the
+# stock Breeze look; turning it off gives the cyberpunk flat-dark
+# feel.
+DrawBackgroundGradient=false
+# Hide the diagonal-stripe size grip at the bottom-right corner of
+# resizable windows — clutters the dark theme.
+DrawSizeGrip=false
+# A 1 px line between the title bar and the window content area; reads
+# better than a gradient for a flat theme.
+DrawTitleBarSeparator=true
+# Square corners — fits the cyberpunk aesthetic better than the
+# default rounded ones, AND avoids the visible quarter-circle alpha
+# notch that rounded corners cut into the cyan accent border.
+RoundBottomCornersWhenMaximized=false
+# Keep the close button highlighted in red on hover (Breeze default)
+# but draw it with an outline so it's visible against our dark bg.
+OutlineCloseButton=true
+# Title-bar text alignment.  Center reads better with the buttons
+# pushed to the right edge.
+TitleAlignment=AlignCenter

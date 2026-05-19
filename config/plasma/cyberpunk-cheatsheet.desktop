@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Cyberpunk hotkey cheatsheet
+GenericName=Hotkey cheatsheet
+Comment=Show the cyberpunk-dotfiles global shortcuts in a popup (Meta+/)
+# @HOME@ is substituted to $HOME at deploy time by
+# deploy_templated_file in local_setup.sh — same trick as
+# cyberpunk-theme.desktop and conky.desktop, because the XDG Desktop
+# Entry spec has no %h field code.
+Exec=@HOME@/.config/plasma/cheatsheet.sh
+# NoDisplay=true keeps the cheatsheet out of KMenu / KRunner search
+# results — the shortcut is meant to be invoked via Meta+/, not from
+# the application launcher.  Drop this line if you want it discoverable.
+NoDisplay=true
+OnlyShowIn=KDE;
+Icon=help-keyboard-shortcuts
+Categories=Utility;
+StartupNotify=false
+Terminal=false

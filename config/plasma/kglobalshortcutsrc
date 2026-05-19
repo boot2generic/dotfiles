@@ -1,0 +1,116 @@
+# Plasma 6 global keyboard shortcuts — cyberpunk dotfiles
+#
+# Deployed to: ~/.config/kglobalshortcutsrc
+#
+# Why this file exists:
+#   • i3-style virtual-desktop workflow (Mod=Meta+1..4 to switch,
+#     Meta+Shift+1..4 to move-window).  Plasma 6 ships only Ctrl+F1..F4
+#     by default and only ONE virtual desktop, so out-of-the-box you
+#     have neither the keys nor the desktops to switch between.
+#     The corresponding `Number=4` lives in config/plasma/kwinrc.
+#   • Meta+Return launches Alacritty, mirroring the i3 binding so
+#     muscle memory carries over.
+#   • Meta+Q closes the focused window (i3's $mod+Shift+q without the
+#     Shift); Alt+F4 stays as the secondary slot for legacy workflows.
+#   • Meta+, / Meta+. cycle desktops left/right (i3 idiom).
+#   • Meta+Tab / Meta+W open the Overview (present-windows).
+#
+# Bindings that ship as `none,none` to PRE-EMPT Plasma's conflict
+# resolver (kglobalaccel picks one owner per key on session start and
+# silently demotes the other — see plasmashell + emojier sections below):
+#   • [plasmashell] activate task manager entry 1..4   — claims Meta+1..4
+#   • [plasmashell] manage activities                  — claims Meta+Q
+#   • [services][org.kde.plasma.emojier.desktop] _launch — claims Meta+.
+#
+# Format (KDE Frameworks 6 / kglobalaccel):
+#     Action Name=primary,secondary,Friendly Description
+#   The two shortcut slots may be `none` if unbound.  kwriteconfig6 is
+#   what System Settings → Shortcuts writes to under the hood, so this
+#   file is the supported, version-stable surface.
+#
+# Idempotency: deployed by a kwriteconfig6 MERGE block in
+# local_setup.sh deploy_phase (preserves the user's other bindings),
+# with an `install -D` fallback when kwriteconfig6 isn't available
+# yet.  apply-theme.sh additionally pushes every binding into the live
+# session via `org.kde.KGlobalAccel.setShortcut` over dbus-send so
+# changes take effect without a logout — necessary because on Plasma 6
+# Wayland kglobalaccel runs inside kwin_wayland (no separate daemon to
+# kquitapp6/kstart6) and does NOT re-read this file on change.
+
+[kwin]
+# Virtual-desktop SWITCH bindings (Meta+N).
+#
+# IMPORTANT: only ONE shortcut in the primary slot.  Plasma 6's
+# kglobalaccel daemon, when it sees a tab-separated `Meta+N\tCtrl+FN`
+# multi-binding, runs its own conflict-resolver and on reload collapses
+# the field down to whichever single key it deems "winning" — which has
+# been Ctrl+FN in our testing.  Net effect: shipping the alternates
+# silently regressed Meta+N back to the Plasma factory Ctrl+FN-only.
+# Use a single primary (Meta+N) and let the user re-bind alternates
+# in System Settings if they want them.
+Switch to Desktop 1=Meta+1,none,Switch to Desktop 1
+Switch to Desktop 2=Meta+2,none,Switch to Desktop 2
+Switch to Desktop 3=Meta+3,none,Switch to Desktop 3
+Switch to Desktop 4=Meta+4,none,Switch to Desktop 4
+
+# Move ACTIVE WINDOW to desktop N (Meta+Shift+N) — the i3 idiom for
+# relocating a window without leaving the current desktop.
+Window to Desktop 1=Meta+Shift+1,none,Window to Desktop 1
+Window to Desktop 2=Meta+Shift+2,none,Window to Desktop 2
+Window to Desktop 3=Meta+Shift+3,none,Window to Desktop 3
+Window to Desktop 4=Meta+Shift+4,none,Window to Desktop 4
+
+# Cycle desktops (i3's $mod+period / $mod+comma equivalents).
+Switch One Desktop to the Right=Meta+period,Meta+Ctrl+Right,Switch One Desktop to the Right
+Switch One Desktop to the Left=Meta+comma,Meta+Ctrl+Left,Switch One Desktop to the Left
+
+# Overview (i3's $mod+s scratchpad-ish summary).  Meta+Tab is the
+# Plasma idiomatic key for the present-windows / desktop-grid view.
+Overview=Meta+Tab,Meta+W,Toggle Overview
+
+# Close focused window (Meta+Q) — i3's $mod+Shift+q without the Shift.
+# Alt+F4 stays as the secondary so legacy / non-Meta workflows still work.
+Window Close=Meta+Q,Alt+F4,Close Window
+
+[plasmashell]
+# Why this section is here even though we don't WANT any plasmashell
+# shortcuts: Plasma ships with `activate task manager entry N` bound to
+# Meta+1..4 and `manage activities` bound to Meta+Q by default.  When
+# kglobalaccel registers both plasmashell's and kwin's bindings on
+# session start, its conflict-resolver picks ONE owner per key and
+# silently DEMOTES the other — and in practice plasmashell wins, which
+# leaves our Meta+1..4 → Switch-to-Desktop and Meta+Q → Close-Window
+# bindings broken.  Explicit `none,none,…` here pre-empts the conflict.
+activate task manager entry 1=none,none,Activate Task Manager Entry 1
+activate task manager entry 2=none,none,Activate Task Manager Entry 2
+activate task manager entry 3=none,none,Activate Task Manager Entry 3
+activate task manager entry 4=none,none,Activate Task Manager Entry 4
+manage activities=none,none,Show Activity Switcher
+
+[services][Alacritty.desktop]
+# The kglobalaccel "_launch" key on a [services][<desktop-id>] section
+# is the supported way to bind a hotkey to launch a .desktop file.
+# /usr/share/applications/Alacritty.desktop ships with the alacritty
+# package on Debian/Ubuntu, so the desktop-id resolves cleanly.
+# Result: Meta+Return spawns alacritty, exactly like `bindsym $mod+Return
+# exec alacritty` in i3.
+_launch=Meta+Return,none,Alacritty
+
+[services][org.kde.plasma.emojier.desktop]
+# Plasma 6 ships the Emoji Selector with default _launch=Meta+. — which
+# steals the key we want for `Switch One Desktop to the Right`.  The
+# kglobalaccel `setShortcut` conflict resolver refuses to reassign a
+# key already owned by a `_launch` service, so we MUST clear emojier
+# explicitly before our Meta+. binding can take.  Keeping emojier on
+# the secondary slot is also unsafe — the resolver may promote it back.
+_launch=none,none,Emoji Selector
+
+[services][cyberpunk-cheatsheet.desktop]
+# Meta+/ → kdialog popup listing the cyberpunk-dotfiles bindings.
+# Mirrors the i3 idiom of `bindsym $mod+slash` for a help overlay.
+# The .desktop file is deployed by local_setup.sh to
+# ~/.local/share/applications/cyberpunk-cheatsheet.desktop and its
+# Exec= line runs config/plasma/cheatsheet.sh, which regenerates the
+# popup contents from THIS file every time — so the cheatsheet stays
+# in lockstep with whatever bindings we ship here.
+_launch=Meta+Slash,none,Cyberpunk hotkey cheatsheet
