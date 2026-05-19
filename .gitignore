@@ -16,11 +16,30 @@ __pycache__/
 # Sensitive backups created by setup-time tooling.  These contain raw
 # /etc/network/interfaces / /etc/default/grub / /etc/apt/sources.list
 # content which can include wifi PSKs, kernel cmdlines with disk UUIDs,
-# etc.  Don't commit them.
+# etc.  Don't commit them.  Cover both bare `*.bak` (older naming) and
+# the timestamped `*.bak.<TS>` form (current naming).
+*.bak
 *.bak.*
 
-# direnv local state inside any in-tree templates (templates/*/.direnv).
+# Scratch / pid / tmp files that occasionally land in the tree from
+# half-finished tooling runs.  Test artifacts shouldn't be committed.
+*.pid
+*.tmp
+.tmp/
+
+# direnv local state.  In-tree templates (templates/*/.direnv) are
+# covered by the glob; we also guard against a stray `.envrc` at the
+# repo root (per-machine direnv state, not the template `.envrc` files
+# under templates/*/).
 **/.direnv/
+/.envrc
+
+# KDE / plasma per-machine runtime caches.  Should never end up in the
+# config/ tree but glob-guard anyway in case kwriteconfig6 ever writes
+# next to a tracked file.
+config/plasma/.cache/
+config/plasma/**/*.local
+config/**/.cache/
 
 # Nix flake build artifacts
 result
@@ -32,3 +51,9 @@ Thumbs.db
 
 # Local logs from setup runs
 *.log
+
+# Offline-install bundle built by scripts/build-bundle.sh.  Contains
+# *.deb files (~150-250 MB), upstream git clones, and the starship
+# release tarball — none of which belong in version control.  The
+# bundle is per-distro/per-arch and can be regenerated at any time.
+bundle/

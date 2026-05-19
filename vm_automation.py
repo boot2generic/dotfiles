@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
 """
+vm_automation.py                              ── Install Path B ──
+
 VM automation helpers for the Debian 13 development VM.
+
+Use case: provisioning the FULL GUI stack on a remote VM via SSH +
+pexpect.  Older script — intentionally NOT at full parity with
+local_setup.sh (Path A).  See README.md's "Feature-parity matrix"
+for the exact gaps.
+
+Compared to:
+  • Path A (local_setup.sh):       same full GUI install but LOCAL
+  • Path C (provision-server.sh):  remote-via-SSH but shell-only
+  • Path D (install-shell.sh):     local + shell-only
+
+If you're after parity-perfect GUI install on a remote VM and don't
+specifically need this script's pexpect-driven unattended-from-bare
+behavior, the recommended workflow is:
+    git push your dotfiles repo
+    ssh into the VM, git clone + cd
+    ./local_setup.sh setup --bypass
 
 Privilege escalation uses sudo with NOPASSWD (not su).  Run
 `python3 vm_automation.py bootstrap` once after initial provisioning to
@@ -532,7 +551,7 @@ def bootstrap_sudo() -> int:
     if "SUDO_OK" in out:
         print("[ok] sudo installed and NOPASSWD configured")
         # Remove any shim files left from the su debugging session
-        run("rm -f ~/.local/bin/generic 2>/dev/null || true")
+        run(f"rm -f ~/.local/bin/{shlex.quote(VM_USER)} 2>/dev/null || true")
         return 0
 
     print("[!] sudo installed but NOPASSWD verification failed")
@@ -674,7 +693,7 @@ BASE_PACKAGES = [
     # the service, but it stays inactive when no power-supply sysfs
     # entries exist.  `acpi` / `powertop` are likewise harmless inside
     # the VM and useful when the same dotfiles deploy onto a laptop.
-    "tlp", "tlp-rdw", "acpi", "powertop",
+    "tlp", "tlp-rdw", "acpi", "powertop", "btop",
 
     # Terminal tools (tmux / neovim / zsh stack)
     "tmux", "neovim", "zsh", "fzf", "ripgrep", "fd-find",
@@ -716,6 +735,13 @@ BASE_PACKAGES = [
     # parity with local_setup.sh so VM and physical installs validate the
     # same way.
     "fwupd",
+
+    # direnv — auto-loads per-directory env when you cd into a project.
+    # Paired with nix-direnv (set up by local_setup.sh's install_nix
+    # phase, not by this script) for flake-based dev shells.  Even
+    # without Nix, direnv's `.envrc` file is useful for plain bash env
+    # vars per project.  Mirrors local_setup.sh's BASE_PACKAGES.
+    "direnv",
 ]
 
 NVIDIA_PACKAGES = [
@@ -1536,7 +1562,7 @@ echo OK
     _, zsh_path_raw = run("command -v zsh 2>/dev/null || echo ''")
     zsh_path = zsh_path_raw.strip()
 
-    _, current_shell_raw = run("getent passwd generic | cut -d: -f7")
+    _, current_shell_raw = run(f"getent passwd {shlex.quote(VM_USER)} | cut -d: -f7")
     current_shell = current_shell_raw.strip()
 
     if "zsh" in current_shell:
@@ -1615,7 +1641,7 @@ VALIDATION_CHECKS = [
     ("nvim config",         "test -f ~/.config/nvim/init.lua && echo ok"),
     ("~/.zshrc",            "test -f ~/.zshrc && echo ok"),
     ("starship config",     "test -f ~/.config/starship/starship.toml && echo ok"),
-    ("default shell",       "getent passwd generic | cut -d: -f7"),
+    ("default shell",       f"getent passwd {shlex.quote(VM_USER)} | cut -d: -f7"),
     # Pretty CLI tools
     ("bat/batcat",          "command -v bat 2>/dev/null || command -v batcat 2>/dev/null"),
     ("grc",                 "which grc"),
@@ -1642,6 +1668,12 @@ VALIDATION_CHECKS = [
     ("rfkill",                     "command -v rfkill 2>/dev/null || (test -x /usr/sbin/rfkill && echo /usr/sbin/rfkill)"),
     ("acpi",                       "which acpi"),
     ("powertop",                   "command -v powertop 2>/dev/null || (test -x /usr/sbin/powertop && echo /usr/sbin/powertop)"),
+    # Tools added in install_phase package-list updates.  Kept in
+    # sync with local_setup.sh's VAL_CHECKS so a parity-table
+    # comparison between the two scripts is straightforward.
+    ("fwupd",                      "command -v fwupdmgr 2>/dev/null || (test -x /usr/bin/fwupdmgr && echo /usr/bin/fwupdmgr)"),
+    ("direnv",                     "which direnv"),
+    ("btop",                       "which btop"),
 ]
 
 HYPERV_CHECKS = [
