@@ -1,9 +1,39 @@
 #!/usr/bin/env bash
-# local_setup.sh — local mirror of vm_automation.py.
+# local_setup.sh                              ── Install Path A ──
 #
-# Provisions the *current* machine with the same i3/polybar/picom/zsh/neovim
-# stack that vm_automation.py installs on the remote dev VM, but runs
-# everything locally — no SSH, no pexpect.
+# Provisions the *current* machine with the full desktop stack — runs
+# locally, no SSH, no pexpect.  Two desktop paths:
+#
+#   • --desktop=i3      (default) — X11 + i3 + polybar + picom + rofi
+#                         + dunst + lightdm + pulseaudio.  The
+#                         original cyberpunk stack; behaviour is
+#                         byte-identical to pre-Plasma versions of
+#                         this script.
+#   • --desktop=plasma            — KDE Plasma 6 on Wayland + KWin
+#                         + sddm + pipewire + konsole + dolphin +
+#                         kde-config-screenlocker.  Recommended on
+#                         physical desktops with NVIDIA + multi-
+#                         monitor / high-refresh-rate panels.
+#
+# All non-WM configs (alacritty, nvim, tmux, conky, wallpaper, zsh
+# stack) carry over identically between the two paths.  See
+# readme/plasma.md for the Plasma-specific details and NVIDIA-on-
+# Wayland gotchas.
+#
+# Use case: you're sitting at the box you want to configure (laptop or
+# desktop) and you want the FULL desktop install: drivers, fonts,
+# display manager, hardening flow, the works.
+#
+# Compared to:
+#   • Path B (vm_automation.py):     remote-via-SSH, full GUI.  Older,
+#                                    intentionally not at full parity
+#                                    with this script — see README's
+#                                    "Feature-parity matrix".
+#   • Path C (provision-server.sh):  remote-via-SSH, shell-only.
+#   • Path D (install-shell.sh):     local, shell-only.  Subset of
+#                                    what this script does.
+#
+# See README.md "Feature-parity matrix" for the full capability table.
 #
 # Supported: Debian 12 (bookworm), Debian 13 (trixie), and future Debian
 # releases. Other distros are rejected — they tend to be missing packages
@@ -55,9 +85,12 @@
 #   ./local_setup.sh deploy           # deploy ./config → ~/.config
 #   ./local_setup.sh terminal         # tmux/nvim/zsh stack only
 #   ./local_setup.sh validate         # post-install checks
-#   ./local_setup.sh harden           # OPT-IN: narrow sudo, ufw, auto-updates,
+#   ./local_setup.sh harden           # OPT-IN: narrow sudo, ufw, auto security
+#                                     #          updates, auditd rules,
 #                                     #          systemd-resolved + DoT (Quad9)
 #   ./local_setup.sh unharden         # revert harden (re-broaden sudoers etc.)
+#   ./local_setup.sh --show-overrides # list per-host overrides currently in
+#                                     # effect under ~/.config/dotfiles-local/
 #
 # Mode flags (only meaningful for `setup`):
 #   --interactive | -i                Default — explain + confirm each stage.
@@ -80,6 +113,23 @@
 #                                     steam-installer (Debian's Steam
 #                                     bootstrap).  Skip if you prefer
 #                                     Flatpak Steam.
+#   --desktop=i3 | --desktop=plasma   Select the desktop stack to
+#                                     install + deploy + validate.
+#                                     `--i3` and `--plasma` are
+#                                     shorthand for the same.  Default
+#                                     is i3.  Picking `plasma` swaps:
+#                                       - apt set: plasma-desktop +
+#                                         kwin-wayland + sddm +
+#                                         pipewire + xwayland + …
+#                                       - lightdm → sddm
+#                                       - pulseaudio → pipewire-pulse
+#                                       - i3/polybar/picom/rofi/dunst
+#                                         configs → plasma equivalents
+#                                       - On NVIDIA + physical: extra
+#                                         kernel-cmdline + initramfs
+#                                         + modprobe.d + systemd
+#                                         pieces for Wayland-safe
+#                                         suspend/resume.
 #   --no-nix                          Skip the Nix package manager
 #                                     install.  Default is to install
 #                                     Nix in multi-user (daemon) mode +
@@ -107,6 +157,13 @@
 #                                     done it manually, or where wifi
 #                                     creds live somewhere else).
 #
+# Environment variables:
+#   DOTFILES_NO_LOCAL=1                Disable the ~/.config/dotfiles-local/
+#                                     overlay for one run.  Useful when
+#                                     debugging — confirms whether a
+#                                     misbehaviour is in the repo configs
+#                                     or in your per-host overrides.
+#
 
 set -euo pipefail
 
@@ -116,7 +173,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="${SCRIPT_DIR}/config"
 SCRIPTS_DIR="${SCRIPT_DIR}/scripts"
-LOG_DIR="${TMPDIR:-/tmp}"
+# Per-run private log dir.  Was `${TMPDIR:-/tmp}` (world-readable, predictable
+# names) — the install drops ~30 logs (apt_install_*.log, nvim_lazy.log,
+# nerd-fonts-sha256.txt, etc.) into LOG_DIR, and several contain package /
+# mirror metadata you don't necessarily want readable by other local users.
+# mktemp -d creates the dir mode 0700 already on Debian; chmod 700 is belt-and-
+# braces.  Dir is INTENTIONALLY kept after the run for postmortem (it lives
+# under TMPDIR which tmpfiles.d cleans on reboot anyway).
+LOG_DIR="$(mktemp -d -t dotfiles-setup.XXXXXX)" \
+    || { echo "[!!] mktemp -d failed — cannot continue" >&2; exit 1; }
+chmod 700 "$LOG_DIR" 2>/dev/null || true
 
 # Colour helpers (only when stdout is a TTY)
 if [[ -t 1 ]]; then
@@ -166,9 +232,19 @@ ensure_sudo() {
   # `sudo -v` needs a TTY when `Defaults use_pty` is set, which is the
   # default on Ubuntu/Debian — so this path only works in interactive runs.
   sudo -v || die "sudo authentication failed (configure NOPASSWD or run interactively)."
-  ( while true; do sudo -n true; sleep 60; done ) &
+  # BOUNDED keepalive: the old `while true; do … sleep 60; done` would
+  # outlive a `kill -9` of the parent (the EXIT trap doesn't fire on
+  # SIGKILL) and keep refreshing sudo's timestamp until next reboot.
+  # Cap at SUDO_KEEPALIVE_MINUTES (default 90) — long enough for the
+  # slowest end-to-end install (nvidia + nvim + everything), short
+  # enough that an orphaned keepalive isn't an indefinite leak.
+  local minutes="${SUDO_KEEPALIVE_MINUTES:-90}"
+  ( for _ in $(seq 1 "$minutes"); do sudo -n true 2>/dev/null || exit 0; sleep 60; done ) &
   SUDO_KEEPALIVE_PID=$!
-  trap '[[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+  # Trap HUP/INT/TERM in addition to EXIT so common kill paths (Ctrl-C,
+  # `kill <pid>`, ssh disconnect → SIGHUP) also reap the child.  `kill -9`
+  # remains uncatchable, but the bounded loop above caps that scenario.
+  trap '[[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT HUP INT TERM
 }
 
 # ============================================================
@@ -304,6 +380,7 @@ print_hardware() {
   printf "    %-12s %s\n" "DMI product" "${DMI_PRODUCT:-unknown}"
   printf "    %-12s %s\n" "GPU vendor"  "$GPU_VENDOR"
   printf "    %-12s %s\n" "CPU vendor"  "${CPU_VENDOR:-unknown}"
+  printf "    %-12s %s\n" "Desktop"     "${DESKTOP:-i3}"
   if [[ -n "${GPU_RAW:-}" ]]; then
     while IFS= read -r line; do
       printf "    %-12s %s\n" "  PCI" "${line:0:90}"
@@ -316,58 +393,41 @@ print_hardware() {
 # Package lists  (kept in sync with vm_automation.py BASE_PACKAGES)
 # ============================================================
 BASE_PACKAGES=(
-  # X server + display infrastructure
-  xorg xserver-xorg x11-xserver-utils xinit xvfb dbus-x11
-  # WM + compositor + bar + launcher
-  i3 polybar picom rofi
-  # Terminal emulator
+  # Terminal emulator (used as the default terminal under both desktops)
   alacritty
-  # Notifications
-  dunst libnotify-bin
-  # Display manager
-  lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings
-  # Wallpaper + screenshots
-  feh scrot
   # Fonts
   fonts-jetbrains-mono fonts-font-awesome
   fonts-material-design-icons-iconfont
-  # GTK themes + icons
-  adwaita-icon-theme papirus-icon-theme lxappearance
-  # File manager + network applet
-  thunar gvfs network-manager-gnome network-manager
+  # GTK themes + icons (GTK apps run under either desktop)
+  adwaita-icon-theme papirus-icon-theme
   # Web browser — Debian ships Firefox as `firefox-esr` (not `firefox`).
   # The i3 Mod+b binding launches firefox-esr directly.  To swap, edit
   # the binding in ~/.config/i3/config after installing your alternate
   # (mullvad-browser, chromium, …).
   firefox-esr
-  # Audio + media-key controls.  `pactl` (pulseaudio) handles volume;
-  # `playerctl` talks MPRIS so play/pause/next/prev work for any media
-  # player (Spotify, mpv, Firefox, VLC, …).
-  pulseaudio pavucontrol playerctl
+  # MPRIS media-key controller — same tool drives the i3 media scripts
+  # and Plasma's media-key shortcuts.  Player-agnostic (Spotify, mpv,
+  # Firefox, VLC, …).
+  playerctl
   # WireGuard VPN — userland (`wg`, `wg-quick`).  Drop a config into
   # /etc/wireguard/<name>.conf and `sudo wg-quick up <name>`.  Kernel
   # module ships in modern Debian kernels, no DKMS needed.
   wireguard wireguard-tools
-  # Utilities
-  numlockx arandr xclip xdotool brightnessctl
-  i3lock imagemagick python3-pil
+  # NetworkManager backbone — shared by both desktops.  The X11
+  # `nm-applet` (network-manager-gnome) lives in DESKTOP_I3_PACKAGES;
+  # Plasma uses `plasma-nm` in DESKTOP_PLASMA_PACKAGES instead.
+  network-manager
+  # Brightness control — works under both X11 and Wayland.
+  brightnessctl
   # Network diagnostics + radio toggle.  `iw` exposes signal/bitrate/SSID
   # for low-level wifi troubleshooting (`iw dev wlan0 link`); `rfkill`
-  # backs the XF86WLAN keybind that toggles the wireless radio.  The
-  # connection manager itself (NetworkManager + nm-applet) is already
-  # listed above — these are the CLI-level helpers.
+  # backs the XF86WLAN keybind that toggles the wireless radio.
   iw rfkill
   # Battery / power management.  TLP is the canonical ThinkPad win:
   # default profile drops idle power 20-40% with no user config.
   # `acpi` gives a one-line battery summary used by polybar's fallback;
   # `powertop` is on-demand only (run `sudo powertop` to audit drains).
   tlp tlp-rdw acpi powertop btop
-  # wmctrl + x11-utils (xprop / xwininfo / xdpyinfo) — kept around
-  # as desktop-environment diagnostic tools.  An earlier revision of
-  # config/conky/launch.sh used them for a keep-below daemon; that's
-  # gone now (own_window_type='override' means the WM ignores conky
-  # entirely — no manual lowering required).
-  wmctrl x11-utils
   # Terminal stack
   tmux neovim zsh fzf ripgrep fd-find
   # build-essential = gcc + g++ + make + libc6-dev — required to compile
@@ -376,7 +436,8 @@ BASE_PACKAGES=(
   nodejs npm
   # Shell tools
   rsync curl wget git htop fastfetch
-  # Pretty CLI
+  # Pretty CLI — conky-all stays in common; it runs under Xwayland on
+  # the plasma path via a kwin rule (see patch_conky_window_type).
   bat grc net-tools lm-sensors conky-all iproute2
   # Detection helpers
   pciutils dmidecode
@@ -388,24 +449,200 @@ BASE_PACKAGES=(
   fwupd
   # Storage health monitoring.  Both packages are tiny and become
   # essential the moment the user has more than one drive.
-  #   smartmontools — `smartctl -a /dev/sdX` reports SMART attributes
-  #                   (reallocated sectors, hours, wear leveling, ...)
-  #                   for SATA HDDs and SATA/NVMe SSDs.  Drop a cron or
-  #                   `smartd` config to email on disk decline.
-  #   nvme-cli      — `nvme list`, `nvme smart-log /dev/nvmeXn1`.  NVMe
-  #                   exposes more health stats than SATA SMART; this
-  #                   is the canonical client.
+  #   smartmontools — `smartctl -a /dev/sdX` reports SMART attributes.
+  #   nvme-cli      — `nvme list`, `nvme smart-log /dev/nvmeXn1`.
   smartmontools nvme-cli
   # direnv — auto-loads a per-directory environment when you `cd` into
   # a project.  Paired with `nix-direnv` (installed by install_nix
-  # later) this turns `flake.nix` files into transparent dev shells:
-  # cd in → tools available; cd out → tools gone.  Tiny package; no
-  # effect until a `.envrc` exists in some directory.
+  # later) this turns `flake.nix` files into transparent dev shells.
   direnv
   # Archive tools — Mason needs `unzip` to extract clangd's release zip.
-  # Without it, `:Mason` install of clangd silently fails with
-  # "spawn: unzip … unzip is not executable".
   unzip
+  # X11 utilities — useful as diagnostics under Plasma too (xprop /
+  # xwininfo work against Xwayland clients).
+  x11-utils
+)
+
+# DESKTOP_I3_PACKAGES — installed only when DESKTOP=i3 (default).
+# X11 server + WM + compositor + bar + launcher + notifications + DM +
+# lockscreen + file manager + pulseaudio audio stack.  Plasma users
+# don't get any of these — KWin/Plasma/sddm/dolphin/kscreenlocker
+# from DESKTOP_PLASMA_PACKAGES replace them.
+DESKTOP_I3_PACKAGES=(
+  # X server + display infrastructure
+  xorg xserver-xorg x11-xserver-utils xinit xvfb dbus-x11
+  # WM + compositor + bar + launcher (all X11-only)
+  i3 polybar picom rofi
+  # Notifications
+  dunst libnotify-bin
+  # Display manager
+  lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings
+  # Wallpaper + screenshots
+  feh scrot
+  # GTK theming UI
+  lxappearance
+  # File manager + X11 network-applet (tray)
+  thunar gvfs network-manager-gnome
+  # Audio (PulseAudio + GTK mixer UI)
+  pulseaudio pavucontrol
+  # X11-only utilities + lockscreen
+  numlockx arandr xclip xdotool
+  i3lock imagemagick python3-pil
+  # WM diagnostics
+  wmctrl
+)
+
+# DESKTOP_PLASMA_PACKAGES — installed only when DESKTOP=plasma.
+# Wayland-native KDE Plasma 6 stack with SDDM, PipeWire audio, Qt
+# Wayland support, and a small set of native KDE apps that integrate
+# via KIO/KWallet.  Plasma's panel + KNotifications + KRunner +
+# kscreenlocker replace polybar/dunst/rofi/i3lock — none of those
+# X11 packages are installed on this path.
+#
+# NOT included — KWin tiling scripts (Polonium / Bismuth / Krohnkite).
+# Polonium is the actively-maintained i3-style tiling KWin script for
+# Plasma 6, but as of Debian Trixie it is NOT packaged in apt
+# (`apt-cache search ^polonium` returns nothing; Bismuth was dropped
+# during the Plasma 5→6 transition).  We deliberately do NOT pull in
+# a tiling layer from a third-party source (KDE Store ZIP, GitHub
+# release tarball) because:
+#   • There's no signed-package update path — drift between users.
+#   • Polonium claims Meta+H/V/F/M/etc., which collides with our
+#     Meta+1..4 / Meta+Q / Meta+Return / Meta+. bindings and would
+#     either re-fight the kglobalaccel conflict resolver every
+#     session or silently demote our keys.
+#   • The cyberpunk dotfiles already give an i3-flavoured workflow
+#     via four virtual desktops + Meta-prefix hotkeys; floating
+#     window placement is the only piece that differs from i3.
+# If a future Debian release ships Polonium, add it here and document
+# which Meta+ keys it claims by default in readme/plasma.md.
+DESKTOP_PLASMA_PACKAGES=(
+  # Core Plasma 6 desktop.  Both compositor backends are installed:
+  #   • kwin-wayland — the default + headline target (NVIDIA + multi-
+  #                    monitor + high-refresh).
+  #   • kwin-x11     — fallback when KMS is unreliable.  Specifically:
+  #                    - Hyper-V Generation 2 VMs without Enhanced
+  #                      Session work-around
+  #                    - VirtualBox with default VBoxVGA (no KMS)
+  #                    - Older Intel/AMD iGPUs (pre-Skylake/Vega)
+  #                    Without kwin-x11 installed, /usr/share/xsessions/
+  #                    plasmax11.desktop is listed in SDDM but launching
+  #                    it fails (no compositor).  Small download, big UX
+  #                    payoff for VM users.
+  plasma-desktop plasma-workspace plasma-workspace-data
+  kwin-wayland kwin-x11 kwin-style-breeze
+  # Display manager (replaces lightdm)
+  sddm sddm-theme-breeze
+  # Wayland support — Xwayland for legacy X11 apps (incl. conky), Qt
+  # Wayland platform plugin for Qt apps.
+  xwayland qt6-wayland
+  # PipeWire audio stack — pipewire-pulse provides the pulseaudio
+  # client-library shim, so existing pulseaudio clients (pactl, mpv,
+  # firefox) keep working.  apt's Conflicts/Replaces resolution will
+  # remove pulseaudio when this set lands.
+  pipewire pipewire-pulse wireplumber pavucontrol-qt
+  # Wayland clipboard CLI (wl-copy / wl-paste) — replaces xclip
+  wl-clipboard
+  # Screenshot tool (KWin-integrated) — replaces scrot
+  kde-spectacle
+  # Native KDE apps — light footprint; integrate with KIO/KWallet.
+  konsole dolphin kwallet6 polkit-kde-agent-1
+  # Lock screen daemon — replaces i3lock.
+  kde-config-screenlocker
+  # plasma-apply-* live here; used by config/plasma/apply-theme.sh.
+  kde-cli-tools
+  # kdialog — rendering target for config/plasma/cheatsheet.sh (the
+  # Meta+/ "cyberpunk hotkey cheatsheet" popup that lists our shipped
+  # global shortcuts).  Not in kde-cli-tools on Debian Trixie (it
+  # ships as its own package).  cheatsheet.sh degrades to a terminal
+  # printout if kdialog is missing, so install doesn't hard-fail —
+  # but the popup UX requires this package.
+  kdialog
+  # qdbus6 binary — apply-theme.sh uses it to send a plasma-script over
+  # the org.kde.plasmashell D-Bus interface to set panel height +
+  # autohide.  Without it, the panel-resize step is skipped silently
+  # and the user gets the default 44 px taskbar.
+  qdbus-qt6
+  # python3-dbus — apply-theme.sh batches every kglobalaccel
+  # setShortcut call through config/plasma/kga_push.py, which opens
+  # ONE D-Bus session connection and drives every setShortcut down it.
+  # The previous implementation forked dbus-send 17 times per session
+  # start (~170 ms wall clock); the Python helper is ~25-35 ms.  If
+  # python3-dbus is missing, apply-theme.sh falls back to the legacy
+  # dbus-send loop transparently, so install does not hard-fail — but
+  # the fast path requires this package.
+  python3-dbus
+  # kquitapp6 / kstart6 live in libkf6dbusaddons-bin on Debian Trixie
+  # (NOT in kde-cli-tools — the Debian split surprises plasma users
+  # coming from Arch).  apply-theme.sh uses them to live-reload
+  # kglobalaccel after writing kglobalshortcutsrc, so the new
+  # Meta+1..4 / Meta+Return bindings take effect without a logout.
+  libkf6dbusaddons-bin
+  # kwriteconfig6 — used by deploy_phase to MERGE our shipped
+  # kglobalshortcutsrc keys into the user's existing one (rather than
+  # overwriting and nuking the dozens of plasma factory bindings the
+  # user actively relies on: volume keys, media keys, Sleep, KRunner).
+  # It also drives a few other surgical config touches in apply-theme.
+  # Already pulled in transitively by powerdevil's dep chain on most
+  # systems, but listing it explicitly guards against future split.
+  libkf6config-bin
+  # UPower — registers the org.freedesktop.UPower D-Bus service that
+  # powerdevil queries for battery + lid + adapter state.  Critically,
+  # `powerdevil` does NOT Recommends: upower (it Recommends:
+  # power-profiles-daemon — which we explicitly DO NOT want, because it
+  # conflicts with TLP), so apt's --no-install-recommends doesn't help
+  # and the dependency must be listed by name.  Without UPower the
+  # symptoms on a T14 (or any laptop) are:
+  #   • Battery widget shows "no batteries detected"
+  #   • Lid-close action does nothing
+  #   • Screen never blanks / suspends on idle
+  #   • powerdevil's journal floods with "org.freedesktop.UPower was
+  #     not provided by any .service files"
+  # No-op on the desktop (3080 Ti box) — UPower happily reports an
+  # empty device list when there's no battery, and the AC-adapter info
+  # it provides is still useful for sleep events.
+  upower
+  # Theming — Plasma side + GTK app integration so firefox / thunderbird
+  # / GIMP etc. render with the active Plasma color scheme rather than
+  # falling back to plain Adwaita.
+  breeze breeze-cursor-theme breeze-icon-theme kf6-breeze-icon-theme
+  breeze-gtk-theme kde-config-gtk-style
+  # System monitor (Plasma-native, replaces polybar CPU/mem modules)
+  plasma-systemmonitor
+  # Plasma system-tray applets — network + audio.
+  plasma-nm plasma-pa
+  # CRITICAL Recommends of plasma-desktop that --no-install-recommends
+  # in apt_install drops.  Without these, the user gets a broken-feeling
+  # Plasma install:
+  #   • systemsettings    — the actual System Settings application.
+  #                          Without it there is NO GUI for any Plasma
+  #                          config.  Mandatory.
+  #   • kscreen           — display-config KCM in System Settings.
+  #                          Without it the user cannot set monitor
+  #                          refresh rate / scale / position / arrangement
+  #                          (kscreen-doctor CLI is the only fallback).
+  #                          This is the headline 3080 Ti use case —
+  #                          mandatory.
+  #   • powerdevil        — power management daemon.  Battery widget,
+  #                          lid action, suspend-on-idle, screen-blank
+  #                          timeout — all gone without it.  Mandatory
+  #                          on laptops (T14); useful on desktops.
+  #   • kde-config-sddm   — System Settings → SDDM page.  Configure
+  #                          autologin / session default / theme via GUI.
+  #   • xdg-desktop-portal-kde — portal API so Flatpak + GTK file
+  #                          dialogs use the Plasma file picker /
+  #                          screenshot picker / file open native UI.
+  #   • kinfocenter       — System Settings → About this system.  Quick
+  #                          NVIDIA driver version / OpenGL / Vulkan
+  #                          info — handy 3080 Ti diagnostics.
+  #   • bluedevil         — Bluetooth applet + KCM.  T14 needs it.
+  #   • kio-extras        — Dolphin support for sftp:// / smb:// /
+  #                          fish:// / mtp:// — remote file access.
+  #   • ksshaskpass       — GUI prompt for SSH key passphrase via
+  #                          kwallet.  No effect for keys without
+  #                          passphrases; nice UX for keys with.
+  systemsettings kscreen powerdevil kde-config-sddm
+  xdg-desktop-portal-kde kinfocenter bluedevil kio-extras ksshaskpass
 )
 
 # Driver / agent packages by detected category
@@ -600,6 +837,11 @@ enable_nonfree() {
   fi
 
   log "Adding contrib/non-free/non-free-firmware drop-in: ${drop}"
+  # URIs use https://.  apt's signing (Signed-By:) already protects
+  # against tampering; https additionally hides which Debian packages
+  # you're installing from passive on-path observers (ISP, captive
+  # portal, coffee-shop wifi, etc.).  deb.debian.org and
+  # security.debian.org both have valid HTTPS certs.
   sudo tee "$drop" >/dev/null <<EOF
 # Managed by local_setup.sh (enable_nonfree).
 # Adds contrib + non-free + non-free-firmware components additively, so
@@ -607,13 +849,13 @@ enable_nonfree() {
 # is never modified.  Remove this file to disable:
 #   sudo rm /etc/apt/sources.list.d/dotfiles-non-free.sources && sudo apt update
 Types: deb
-URIs: http://deb.debian.org/debian
+URIs: https://deb.debian.org/debian
 Suites: ${codename} ${codename}-updates
 Components: contrib non-free non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://security.debian.org/debian-security
+URIs: https://security.debian.org/debian-security
 Suites: ${codename}-security
 Components: contrib non-free non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
@@ -856,6 +1098,187 @@ add_nvidia_modeset() {
   ok "nvidia-drm.modeset=1 added; reboot required to take effect"
 }
 
+add_nvidia_fbdev() {
+  # Append `nvidia-drm.fbdev=1` to GRUB_CMDLINE_LINUX_DEFAULT.  Required
+  # for clean fbcon under nvidia-drm on Wayland: without it, the kernel
+  # framebuffer console doesn't switch through nvidia-drm cleanly,
+  # producing a visible flash + corruption on the tty→sddm→plasma
+  # handoff and (on some monitors) a black screen until VT switch.
+  # Companion to nvidia-drm.modeset=1.  Idempotent.  Plasma-only gate.
+  local grub=/etc/default/grub
+  if [[ ! -f "$grub" ]]; then
+    warn "$grub not found — skipping nvidia-drm.fbdev=1"
+    return 0
+  fi
+  if sudo grep -q 'nvidia-drm\.fbdev=1' "$grub"; then
+    ok "nvidia-drm.fbdev=1 already present in $grub"
+    return 0
+  fi
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  sudo install -m 0644 "$grub" "${grub}.bak.${ts}"
+  log "Adding nvidia-drm.fbdev=1 to $grub (backup: ${grub}.bak.${ts})"
+  sudo sed -i -E \
+    's/^(GRUB_CMDLINE_LINUX_DEFAULT=")([^"]*)"/\1\2 nvidia-drm.fbdev=1"/' \
+    "$grub"
+  if ! sudo grep -q 'nvidia-drm\.fbdev=1' "$grub"; then
+    warn "sed did not add nvidia-drm.fbdev=1 — manual edit required"
+    return 1
+  fi
+  sudo update-grub >"${LOG_DIR}/update-grub-fbdev.log" 2>&1 \
+    || warn "update-grub failed — see ${LOG_DIR}/update-grub-fbdev.log"
+  ok "nvidia-drm.fbdev=1 added; reboot required to take effect"
+}
+
+add_nvidia_early_kms() {
+  # Add nvidia / nvidia_modeset / nvidia_uvm / nvidia_drm to
+  # /etc/initramfs-tools/modules so they load in the initial ramdisk.
+  # On Wayland with KMS this eliminates the early-boot flash and fixes
+  # a class of sddm races where the greeter starts before nvidia-drm
+  # has exposed its DRM connector.  Idempotent.  Plasma-only gate.
+  local mods=/etc/initramfs-tools/modules
+  if [[ ! -f "$mods" ]]; then
+    warn "$mods not found — skipping early-KMS"
+    return 0
+  fi
+  local want=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
+  local missing=() m
+  for m in "${want[@]}"; do
+    if ! sudo grep -qE "^[[:space:]]*${m}([[:space:]]|$)" "$mods"; then
+      missing+=("$m")
+    fi
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    ok "nvidia early-KMS modules already in $mods"
+    return 0
+  fi
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  sudo install -m 0644 "$mods" "${mods}.bak.${ts}"
+  log "Adding ${missing[*]} to $mods (backup: ${mods}.bak.${ts})"
+  # Single trailing block so it's easy to identify and remove.  Each
+  # module on its own line is the documented format.
+  {
+    printf '\n# cyberpunk dotfiles — nvidia Wayland early KMS\n'
+    printf '%s\n' "${missing[@]}"
+  } | sudo tee -a "$mods" >/dev/null
+  sudo update-initramfs -u >"${LOG_DIR}/update-initramfs-kms.log" 2>&1 \
+    || warn "update-initramfs failed — see ${LOG_DIR}/update-initramfs-kms.log"
+  ok "nvidia early-KMS modules added; reboot required"
+}
+
+add_nvidia_pm_options() {
+  # Drop a modprobe.d file telling the nvidia kernel module to preserve
+  # video memory across suspend/resume.  Without this, Wayland sessions
+  # often resume with corrupted textures or fail to repaint.  Then
+  # enable Debian's three companion systemd units (shipped by the
+  # nvidia-driver package but not enabled by default) that wire into
+  # systemd-suspend to do the actual save/restore.  Plasma-only gate.
+  local conf=/etc/modprobe.d/nvidia-power-management.conf
+  if sudo test -f "$conf" \
+     && sudo grep -q 'NVreg_PreserveVideoMemoryAllocations=1' "$conf"; then
+    ok "nvidia PreserveVideoMemoryAllocations already set in $conf"
+  else
+    log "Writing $conf"
+    printf 'options nvidia NVreg_PreserveVideoMemoryAllocations=1\n' \
+      | sudo install -m 0644 /dev/stdin "$conf"
+    ok "wrote $conf — reboot required to take effect"
+    sudo update-initramfs -u >"${LOG_DIR}/update-initramfs-pm.log" 2>&1 \
+      || warn "update-initramfs failed — see ${LOG_DIR}/update-initramfs-pm.log"
+  fi
+  # Enable the three nvidia suspend/resume/hibernate units that pair
+  # with the PreserveVideoMemoryAllocations option.  Each is independent
+  # and silently absent on older driver packages; tolerate missing units.
+  local unit
+  for unit in nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service; do
+    if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "^${unit}"; then
+      sudo systemctl enable "$unit" >/dev/null 2>&1 \
+        && ok "$unit enabled" \
+        || warn "$unit failed to enable"
+    fi
+  done
+}
+
+# --- NVIDIA Wayland session environment ------------------------------
+# Drop /etc/environment.d/95-nvidia-wayland.conf onto NVIDIA boxes so
+# every graphical-session.target child inherits the VRR / cursor /
+# Firefox-Wayland tunables.  Read by pam_systemd at user-session start
+# (see environment.d(5)) — NOT by /etc/environment (which only login(1)
+# / sshd shells see).  Idempotent: `install -D` overwrites in place.
+#
+# Gated on GPU_VENDOR=nvidia.  On the Intel-only T14 this is a no-op
+# that logs and returns 0; the file never lands in /etc/environment.d/.
+#
+# Source-of-truth lives in config/system/etc/environment.d/95-nvidia-
+# wayland.conf — that file has the per-variable comment header.  Edit
+# the source, re-run `./local_setup.sh deploy`; the deployed copy is
+# overwritten.
+deploy_nvidia_wayland_env() {
+  if [[ "$GPU_VENDOR" != "nvidia" ]]; then
+    log "GPU_VENDOR=$GPU_VENDOR — skipping NVIDIA Wayland env drop-in"
+    return 0
+  fi
+  local src="${DOTFILES_DIR}/system/etc/environment.d/95-nvidia-wayland.conf"
+  if [[ ! -f "$src" ]]; then
+    warn "$src missing — skipping nvidia-wayland env"
+    return 1
+  fi
+  sudo install -D -m 0644 -o root -g root "$src" \
+       /etc/environment.d/95-nvidia-wayland.conf
+  ok "/etc/environment.d/95-nvidia-wayland.conf (VRR/G-Sync, cursor, Firefox Wayland)"
+  log "  Log out + back in for new env vars to apply (pam_systemd reads at session start)"
+}
+
+# --- Plasma 6 explicit-sync (NVIDIA 555+) ----------------------------
+# Turn on the Wayland explicit-sync protocol in kwinrc.  Without it,
+# every GL frame on NVIDIA does an implicit fence wait that serialises
+# the whole compositor on the slowest client — visibly stutters on
+# multi-window scenes on the desktop's 3-monitor 1440p/240Hz setup.
+#
+# Version landscape (as of Debian Trixie + recent NVIDIA):
+#   • Plasma / KWin  6.1.x      — supports the protocol, ships it OFF;
+#                                 needs [Wayland] EnableExplicitSync=true
+#                                 in kwinrc to opt in.
+#   • Plasma / KWin  6.2+       — ships it ON BY DEFAULT when both
+#                                 sides support it (NVIDIA driver 555+).
+#                                 Setting the key is harmless — KWin
+#                                 reads it but the default is already
+#                                 the same value, so the key is a no-op.
+#   • NVIDIA driver  < 555      — protocol unsupported by the driver;
+#                                 KWin silently falls back to implicit
+#                                 sync regardless of this key.  Setting
+#                                 it is still harmless.
+#
+# Strategy: ALWAYS write the key when on the plasma + nvidia path.
+# Idempotency + a single code path wins over fragile version-detection
+# in bash.  The key lives in [Wayland] (NOT [Compositing] — KWin 6.x
+# moved Wayland-protocol toggles into the [Wayland] group; see
+# kwinwaylandconfig.kcfg upstream).
+#
+# REMOVE THIS FUNCTION when:
+#   • Debian's plasma-workspace stable is >= 6.3 across all targets
+#     (every Plasma 6.3 build of KWin enables explicit-sync uncondition-
+#     ally), AND
+#   • The minimum NVIDIA driver in apt is >= 580 (no installed user is
+#     stuck on a pre-555 driver where the key was needed as a workaround).
+# At that point the kwinrc key is pure overhead.
+enable_plasma_explicit_sync() {
+  if [[ "$DESKTOP" != "plasma" ]]; then
+    return 0
+  fi
+  if [[ "$GPU_VENDOR" != "nvidia" ]]; then
+    log "GPU_VENDOR=$GPU_VENDOR — skipping Plasma explicit-sync toggle"
+    return 0
+  fi
+  if ! have kwriteconfig6; then
+    warn "kwriteconfig6 missing — cannot set kwinrc EnableExplicitSync."
+    warn "Install libkf6config-bin and re-run \`./local_setup.sh deploy\`."
+    return 1
+  fi
+  local f="${HOME}/.config/kwinrc"
+  kwriteconfig6 --file "$f" --group Wayland \
+    --key EnableExplicitSync true
+  ok ".config/kwinrc [Wayland] EnableExplicitSync=true (NVIDIA explicit-sync)"
+}
+
 install_phase() {
   ensure_sudo
   # Enable non-free / non-free-firmware on any physical machine.
@@ -886,6 +1309,18 @@ install_phase() {
   apt_update
   apt_install "base" "${BASE_PACKAGES[@]}"
 
+  # Desktop-stack packages — picked by $DESKTOP (default i3).
+  #   • i3      → X11 stack (xorg, i3, polybar, picom, lightdm, …)
+  #   • plasma  → KDE Plasma 6 Wayland stack (plasma-desktop, kwin-
+  #               wayland, sddm, pipewire, xwayland, …)
+  # apt's Conflicts/Replaces handles the pulseaudio→pipewire swap on
+  # the plasma path; no manual purge needed.
+  case "$DESKTOP" in
+    i3)     apt_install "desktop (i3)"     "${DESKTOP_I3_PACKAGES[@]}" ;;
+    plasma) apt_install "desktop (plasma)" "${DESKTOP_PLASMA_PACKAGES[@]}" ;;
+    *)      die "Unknown DESKTOP=$DESKTOP (expected i3 or plasma)" ;;
+  esac
+
   # Mullvad VPN — best-effort.  We don't `|| true` inside the function so
   # the user sees the warning, but install_phase keeps going either way.
   install_mullvad || true
@@ -910,6 +1345,15 @@ install_phase() {
   if [[ "$GPU_VENDOR" == "nvidia" && "$VIRT_TYPE" == "physical" \
         && "$NO_DRIVERS" != 1 ]]; then
     add_nvidia_modeset
+    # Extra Wayland-specific NVIDIA tweaks — only meaningful on the
+    # plasma path.  On i3 these would all be no-ops or counterproductive
+    # (early-KMS is fine but not needed; the suspend services are
+    # specifically for Wayland session preservation).
+    if [[ "$DESKTOP" == "plasma" ]]; then
+      add_nvidia_fbdev
+      add_nvidia_early_kms
+      add_nvidia_pm_options
+    fi
   fi
 
   enable_power_services
@@ -989,18 +1433,42 @@ auto_wifi_takeover() {
     return 0
   fi
 
-  # Are credentials recoverable?  Anything missing → bail with a hint.
+  # Are credentials recoverable?  We accept TWO sources, in priority
+  # order:
+  #
+  #   (a) /etc/network/interfaces has a wpa-psk/passphrase/password
+  #       line — the takeover script's pre-import path picks it up
+  #       and creates an NM profile from it.
+  #   (b) NM already has at least one saved 802-11-wireless connection
+  #       (`/etc/NetworkManager/system-connections/*.nmconnection`).
+  #       This catches the realistic post-install state where the user
+  #       configured wifi via nmtui or System Settings, AND something
+  #       else (a downstream package's postinst, an explicit user
+  #       `systemctl start wpa_supplicant`, the netifrc backend) has
+  #       since started a standalone wpa_supplicant.service that's now
+  #       holding the device, leaving `nmcli device status` reporting
+  #       `unavailable`.  In that case takeover is SAFE: stopping
+  #       wpa_supplicant.service hands the device back to NM, which
+  #       autoconnects via the existing saved profile.  This is the
+  #       exact situation that caused the user-visible "plasma network
+  #       widget shows nothing" bug on the T14.
   local has_creds=0
+  local has_nm_profile=0
   if [[ -r /etc/network/interfaces ]] \
      && sudo grep -qE '^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+' \
             /etc/network/interfaces 2>/dev/null; then
     has_creds=1
   fi
-  if (( has_creds == 0 )); then
-    warn "wifi ($wifi_iface) is unmanaged but credentials are not in"
-    warn "/etc/network/interfaces — refusing to auto-takeover (would"
-    warn "leave you offline with no profile to reconnect with)."
-    warn "If you want polybar's wlan pill to work, run:"
+  if nmcli -t -f TYPE connection show 2>/dev/null \
+     | grep -q '^802-11-wireless$'; then
+    has_nm_profile=1
+  fi
+  if (( has_creds == 0 && has_nm_profile == 0 )); then
+    warn "wifi ($wifi_iface) is unmanaged but no creds are recoverable:"
+    warn "  • /etc/network/interfaces has no wpa-psk line"
+    warn "  • NetworkManager has no saved 802-11-wireless profile"
+    warn "Refusing to auto-takeover (would leave you offline)."
+    warn "If you want plasma-nm / polybar's wlan pill to work, run:"
     warn "    ${SCRIPT_DIR}/scripts/take-over-wifi.sh"
     warn "after manually putting the SSID + PSK in a place the script"
     warn "can read (or be ready to type them at its prompt)."
@@ -1126,21 +1594,48 @@ enable_power_services() {
 # ============================================================
 # Config deployment
 # ============================================================
-CONFIG_MAP=(
-  "i3:.config/i3"
-  "polybar:.config/polybar"
-  "picom:.config/picom"
-  "rofi:.config/rofi"
+CONFIG_MAP_COMMON=(
   "alacritty:.config/alacritty"
-  "dunst:.config/dunst"
   "gtk-3.0:.config/gtk-3.0"
   "wallpaper:.config/wallpaper"
   "tmux:.config/tmux"
   "nvim:.config/nvim"
   "starship:.config/starship"
   "conky:.config/conky"
+)
+
+# i3 path — X11-only configs that have no Wayland/Plasma equivalent.
+# lockscreen is i3lock + ImageMagick neon overlay; under plasma, the
+# user gets kscreenlocker driven by config/plasma/kscreenlockerrc.
+CONFIG_MAP_I3=(
+  "i3:.config/i3"
+  "polybar:.config/polybar"
+  "picom:.config/picom"
+  "rofi:.config/rofi"
+  "dunst:.config/dunst"
   "lockscreen:.config/lockscreen"
 )
+
+# Plasma path — `config/plasma/*` deploys piece-by-piece to ~/.config
+# and ~/.local/share/.  apply-theme.sh runs after to live-apply the
+# color scheme and wallpaper (no-op if plasmashell isn't running).
+# The autostart entries (deployed separately via deploy_templated_file
+# below — they contain @HOME@ that must be substituted at deploy time,
+# because the XDG Desktop Entry spec has no %h field code) ensure conky
+# launches under KDE and apply-theme re-runs idempotently on subsequent
+# logins.
+#
+# IMPORTANT: this array is intentionally EMPTY.  Every plasma file is
+# deployed as an individual install -D in the plasma branch of
+# deploy_phase, because deploy_one uses `rsync -a --delete` and the
+# Plasma-side destinations (~/.local/share/color-schemes/,
+# ~/.local/share/konsole/, ~/.config/autostart/) are SHARED dirs that
+# other tools (System Settings, Discover, KDE Connect, password
+# managers, …) populate.  Using --delete there would silently wipe
+# the user's neighboring schemes / profiles / autostart entries on
+# every deploy.  Keep this empty unless a future plasma config lives
+# in a dotfiles-exclusive subdirectory.
+CONFIG_MAP_PLASMA=()
 
 deploy_one() {
   local src_name="$1" dest_rel="$2"
@@ -1165,6 +1660,176 @@ deploy_one() {
   echo "    [ok] ${src_name} → ~/${dest_rel}"
 }
 
+# ============================================================
+# Per-host override layer (~/.config/dotfiles-local/)
+# ============================================================
+# Users with per-machine state (e.g. a 28px conky panel on a 1080p
+# laptop vs. a 36px panel on a 4K desktop) drop overrides into
+# ~/.config/dotfiles-local/<thing>/.  Anything there is rsync'd OVER
+# the repo-deployed files at the end of deploy_phase, so the local
+# override wins without us having to fork the repo per host.
+#
+# Convention:
+#   ~/.config/dotfiles-local/conky/conky.conf  →  overrides
+#   ~/.config/conky/conky.conf                  (repo-deployed)
+#
+# The override dir is INTENTIONALLY outside the repo (user-managed,
+# not git-tracked).  On a clean install nothing exists and apply_local_overrides
+# is a no-op except for creating the empty dir + README.
+#
+# Scope is tight: only files under ~/.config/<...> are layered.  System
+# files under /etc/ are NOT overridable via this mechanism — those go
+# through the harden/install paths with explicit sudo writes, and a
+# user-writable override file would defeat the security intent.
+#
+# Escape hatch:  DOTFILES_NO_LOCAL=1 ./local_setup.sh  disables the
+# overlay step entirely for the current run.
+
+# Path constant.  Single source of truth so --show-overrides + deploy_phase
+# can't drift out of sync.
+DOTFILES_LOCAL_DIR="${HOME}/.config/dotfiles-local"
+
+# Write the explainer README on first install.  We refuse to overwrite
+# an existing README so the user can replace it with their own notes
+# (e.g. "machine = T14, panel=28px, see scripts/foo.sh") without us
+# clobbering them on every re-run.
+_write_local_overrides_readme() {
+  local readme="${DOTFILES_LOCAL_DIR}/README"
+  [[ -e "$readme" ]] && return 0
+  cat > "$readme" <<'EOF'
+# ~/.config/dotfiles-local/
+#
+# Per-host overrides applied AFTER `./local_setup.sh deploy` rsyncs the
+# repo-shipped configs.  Use this dir for machine-specific tweaks that
+# you don't want to commit to the dotfiles repo.
+#
+# Layout — mirrors ~/.config/:
+#
+#   ~/.config/dotfiles-local/conky/conky.conf
+#       overrides  ~/.config/conky/conky.conf
+#
+#   ~/.config/dotfiles-local/polybar/config.ini
+#       overrides  ~/.config/polybar/config.ini
+#
+# Mechanics:
+#   • deploy_phase() rsyncs config/<thing>/ → ~/.config/<thing>/ (with
+#     --delete: orphaned files in ~/.config/<thing>/ are removed).
+#   • Then apply_local_overrides() rsyncs ~/.config/dotfiles-local/<thing>/
+#     → ~/.config/<thing>/ (WITHOUT --delete: overrides only add or
+#     replace; they don't strip repo files that have no local mate).
+#
+# To disable for a single run:
+#   DOTFILES_NO_LOCAL=1 ./local_setup.sh
+#
+# To list overrides currently in effect:
+#   ./local_setup.sh --show-overrides
+#
+# What NOT to put here:
+#   • Anything under /etc/ — system files use a separate (sudo install)
+#     path and intentionally can't be overridden by user-writable files.
+#   • Secrets — this dir is mode 0700 by default but it lives under
+#     $HOME; treat it like the rest of ~/.config (not a vault).
+EOF
+  chmod 0644 "$readme" 2>/dev/null || true
+}
+
+# Ensure ~/.config/dotfiles-local/ exists.  Called from deploy_phase and
+# --show-overrides; idempotent.
+ensure_local_overrides_dir() {
+  local fresh=0
+  [[ -d "$DOTFILES_LOCAL_DIR" ]] || fresh=1
+  mkdir -p "$DOTFILES_LOCAL_DIR"
+  chmod 0700 "$DOTFILES_LOCAL_DIR" 2>/dev/null || true
+  # Only write the README on FIRST creation — see comment above.
+  if (( fresh )); then
+    _write_local_overrides_readme
+    log "Created ${DOTFILES_LOCAL_DIR}/ (per-host override layer; see README)"
+  fi
+}
+
+# Apply user-managed overrides on top of repo-deployed configs.
+# Honoured by deploy_phase().  Skipped entirely under DOTFILES_NO_LOCAL=1.
+# Tightly scoped to ~/.config/ — refuses to touch /etc/ or paths outside
+# $HOME even if the user creates weird subdirs.
+apply_local_overrides() {
+  if [[ "${DOTFILES_NO_LOCAL:-0}" == "1" ]]; then
+    log "DOTFILES_NO_LOCAL=1 — skipping per-host override layer"
+    return 0
+  fi
+  ensure_local_overrides_dir
+  # Nothing to do if user hasn't dropped any overrides.
+  shopt -s nullglob
+  local sub overrode=0
+  for sub in "${DOTFILES_LOCAL_DIR}"/*/; do
+    local name dest
+    name="$(basename "$sub")"
+    # Skip metadata-y names that aren't config subtrees.
+    [[ "$name" == "README" || "$name" == ".git" ]] && continue
+    dest="${HOME}/.config/${name}"
+    # SAFETY: refuse to write outside ~/.config.  If a malicious or
+    # mistyped symlink in the override tree resolves elsewhere, bail.
+    case "$(readlink -f "$dest" 2>/dev/null || echo "$dest")" in
+      "${HOME}/.config/"*) ;;
+      *) warn "    [skip] override ${name} — resolves outside ~/.config"; continue ;;
+    esac
+    mkdir -p "$dest"
+    # NOTE: NO --delete here.  Overrides should ADD/REPLACE files, not
+    # remove repo-shipped files that the user didn't bother to override.
+    rsync -a \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          --exclude='.git' \
+          --exclude='.DS_Store' \
+          "$sub" "${dest}/" 2>/dev/null || true
+    echo "    [override] ${DOTFILES_LOCAL_DIR}/${name}/  →  ~/.config/${name}/"
+    overrode=1
+  done
+  shopt -u nullglob
+  if (( overrode == 0 )); then
+    log "  (no per-host overrides under ${DOTFILES_LOCAL_DIR}/)"
+  fi
+}
+
+# List files currently differing from repo defaults due to local overrides.
+# Driven by --show-overrides.  Read-only; safe to run any time.
+show_overrides() {
+  ensure_local_overrides_dir
+  echo "Per-host overrides under ${DOTFILES_LOCAL_DIR}/"
+  echo "(comparing against repo source in ${DOTFILES_DIR}/)"
+  echo
+  shopt -s nullglob
+  local sub any=0
+  for sub in "${DOTFILES_LOCAL_DIR}"/*/; do
+    local name="$(basename "$sub")"
+    [[ "$name" == "README" || "$name" == ".git" ]] && continue
+    local repo_src="${DOTFILES_DIR}/${name}"
+    if [[ ! -d "$repo_src" ]]; then
+      echo "  [extra]    ${name}/  (no repo source — overrides add files only)"
+      any=1
+      continue
+    fi
+    # Walk the override tree and diff each file against the repo source.
+    local f rel
+    while IFS= read -r -d '' f; do
+      rel="${f#${sub}}"
+      if [[ ! -f "${repo_src}/${rel}" ]]; then
+        echo "  [add]      ${name}/${rel}  (not present in repo)"
+      elif ! cmp -s "$f" "${repo_src}/${rel}"; then
+        echo "  [override] ${name}/${rel}"
+      else
+        echo "  [same]     ${name}/${rel}  (identical to repo — override is a no-op)"
+      fi
+      any=1
+    done < <(find "$sub" -type f -print0 2>/dev/null)
+  done
+  shopt -u nullglob
+  if (( any == 0 )); then
+    echo "  (no overrides; ${DOTFILES_LOCAL_DIR}/ is empty)"
+  fi
+  echo
+  echo "Disable for one run:  DOTFILES_NO_LOCAL=1 ./local_setup.sh"
+}
+
 patch_picom_backend() {
   # xrender for VMs (no GLX/DRI2 reliably), glx for physical
   local conf="${HOME}/.config/picom/picom.conf"
@@ -1180,41 +1845,408 @@ patch_picom_backend() {
   fi
 }
 
+patch_conky_window_type() {
+  # Runtime swap of `own_window_type` in the deployed conky.conf, mirroring
+  # the patch_picom_backend pattern.  Why this needs to differ:
+  #
+  #   • i3   (X11/EWMH)   — 'override' produces an unmanaged window that
+  #                         i3 ignores entirely.  Correct under X11.
+  #   • plasma (Wayland)  — under XWayland, neither 'override' nor
+  #                         'desktop' work: KWin maps both into stacking
+  #                         layers BELOW plasmashell's desktop wallpaper
+  #                         layer, so conky's window disappears (process
+  #                         keeps running — you see it in `ps` — but the
+  #                         window is buried).  The fix is to use
+  #                         'normal' (a managed window) and let KWin
+  #                         rules in config/plasma/kwinrulesrc force it
+  #                         below + skip-taskbar / skip-pager /
+  #                         skip-switcher + no border + no focus.  See
+  #                         the [conky-desktop-pin] section there for
+  #                         the rule keys.
+  #
+  # Single conky.conf in the repo → patched in place after deploy.
+  local conf="${HOME}/.config/conky/conky.conf"
+  [[ -f "$conf" ]] || return 0
+  case "$DESKTOP" in
+    plasma)
+      sed -i "s/own_window_type[[:space:]]*=[[:space:]]*'[^']*'/own_window_type    = 'normal'/" "$conf"
+      ok "conky own_window_type → normal (plasma; kwinrulesrc pins layer)"
+      ;;
+    i3|*)
+      sed -i "s/own_window_type[[:space:]]*=[[:space:]]*'[^']*'/own_window_type    = 'override'/" "$conf"
+      ok "conky own_window_type → override (i3)"
+      ;;
+  esac
+}
+
+# Substitute @HOME@ in a template and root-install the result to $dest.
+# Used for kscreenlockerrc + lightdm greeter — both reference $HOME paths
+# without embedding the user's actual home in the repo file.  Python
+# str.replace beats sed/awk/bash here for the same reason documented at
+# the lightdm site: $HOME may contain `&`, `\`, or the sed delimiter.
+deploy_templated_file() {
+  local src="$1" dest="$2" mode="${3:-0644}"
+  [[ -f "$src" ]] || return 0
+  local tmp; tmp="$(mktemp)" || die "mktemp failed for $src"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" RETURN
+  HOME="$HOME" TPL_IN="$src" python3 -c '
+import os, sys
+sys.stdout.write(
+    open(os.environ["TPL_IN"]).read()
+    .replace("@HOME@", os.environ["HOME"])
+)
+' > "$tmp" \
+    || die "template substitution failed for $src"
+  if [[ "$dest" == /etc/* ]]; then
+    sudo install -m "$mode" "$tmp" "$dest"
+  else
+    install -D -m "$mode" "$tmp" "$dest"
+  fi
+  ok "$dest (templated for \$HOME)"
+}
+
+# ============================================================
+# Laptop chassis detection
+# ============================================================
+# DMI chassis-type encoding (SMBIOS spec §7.4.1):
+#   8 = portable   9 = laptop   10 = notebook   14 = sub-notebook
+# Anything else (3 = desktop, 4 = low-profile, 6 = mini-tower, …) is
+# NOT a laptop and skips mobile-specific deploys (suspend hooks, dock
+# auto-layout, lid-switch tweaks, …).  Cheap to call; no caching needed.
+is_laptop_chassis() {
+  local chassis
+  chassis="$(cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo)"
+  [[ "$chassis" =~ ^(8|9|10|14)$ ]]
+}
+
+# ============================================================
+# L2 — Suspend / resume hygiene hook (laptops only)
+# ============================================================
+# Drops /usr/lib/systemd/system-sleep/cyberpunk-suspend.sh into place;
+# systemd-suspend.service auto-invokes anything under that directory
+# with $1=pre|post and $2=<sleep-action>, so NO unit / timer is needed.
+# The script logs to journal under tag `cyberpunk-suspend` and
+# best-effort restarts plasma-kscreen.service on the resume path if any
+# DRM outputs vanished across suspend (the dock-didn't-re-enumerate
+# failure mode we hit on the T14).  Idempotent — re-running overwrites.
+deploy_suspend_hook() {
+  if ! is_laptop_chassis; then
+    log "non-laptop chassis ($(cat /sys/class/dmi/id/chassis_type 2>/dev/null)); skipping suspend hook"
+    return 0
+  fi
+  local src="${DOTFILES_DIR}/system/usr/lib/systemd/system-sleep/cyberpunk-suspend.sh"
+  if [[ ! -f "$src" ]]; then
+    warn "${src} missing — skipping suspend hook deploy"
+    return 0
+  fi
+  sudo install -D -m 0755 -o root -g root "$src" \
+       /usr/lib/systemd/system-sleep/cyberpunk-suspend.sh
+  ok "/usr/lib/systemd/system-sleep/cyberpunk-suspend.sh (journalctl -t cyberpunk-suspend)"
+}
+
+# ============================================================
+# L6 — Dock auto-layout (laptops only)
+# ============================================================
+# Drops the udev rule + handler script.  The handler runs as root from
+# udev's RUN+=, then `runuser -u <graphical-user>`'s into the user's
+# DBUS session to invoke kscreen-doctor.  Layouts are persisted under
+# ~/.config/dotfiles/dock-layouts/<dock-hash>.json (per-machine state,
+# NOT in the repo); ~/.config/dotfiles-local/dock-layouts/ takes
+# precedence if populated, mirroring apply_local_overrides convention.
+#
+# On first connect with no saved layout, the handler SAVES the current
+# layout — so the user docks-once-with-monitors-arranged and every
+# subsequent re-dock auto-applies.
+#
+# Idempotent — install + udevadm reload + trigger every deploy.
+deploy_dock_handler() {
+  if ! is_laptop_chassis; then
+    log "non-laptop chassis; skipping dock auto-layout hook"
+    return 0
+  fi
+  local sh_src="${DOTFILES_DIR}/system/usr/local/bin/cyberpunk-dock-handler.sh"
+  local rule_src="${DOTFILES_DIR}/system/etc/udev/rules.d/95-cyberpunk-dock.rules"
+  if [[ ! -f "$sh_src" || ! -f "$rule_src" ]]; then
+    warn "dock handler sources missing under ${DOTFILES_DIR}/system/ — skipping"
+    return 0
+  fi
+  sudo install -D -m 0755 -o root -g root "$sh_src" \
+       /usr/local/bin/cyberpunk-dock-handler.sh
+  ok "/usr/local/bin/cyberpunk-dock-handler.sh"
+  sudo install -D -m 0644 -o root -g root "$rule_src" \
+       /etc/udev/rules.d/95-cyberpunk-dock.rules
+  ok "/etc/udev/rules.d/95-cyberpunk-dock.rules"
+  # Apply without reboot.  `control --reload-rules` re-reads rule files;
+  # `trigger` re-fires `add` for devices already on the bus so a
+  # currently-attached dock picks up the new rule immediately.
+  # Best-effort — udev failures shouldn't abort the deploy.
+  sudo udevadm control --reload-rules 2>/dev/null \
+    || warn "udevadm control --reload-rules failed"
+  sudo udevadm trigger --subsystem-match=usb --action=add 2>/dev/null \
+    || warn "udevadm trigger failed"
+  log "  dock layouts → ~/.config/dotfiles/dock-layouts/<hash>.json"
+  log "  override via   ~/.config/dotfiles-local/dock-layouts/<hash>.json"
+  log "  inspect events:  journalctl -t cyberpunk-dock -f"
+}
+
 deploy_phase() {
   ensure_sudo
-  log "Deploying config files …"
+  log "Deploying config files (desktop=${DESKTOP}) …"
   local entry name dest
-  for entry in "${CONFIG_MAP[@]}"; do
+
+  # NVIDIA Wayland env vars — system-wide file under /etc/environment.d/.
+  # Gated internally on GPU_VENDOR=nvidia; no-op + log on Intel/AMD-only
+  # boxes (e.g. T14).  Applies to BOTH desktops (i3 + plasma) because
+  # the env vars are session-wide and only meaningful when the NVIDIA
+  # driver is loaded — harmless on i3 if someone reverse-runs that path.
+  deploy_nvidia_wayland_env || warn "(nvidia-wayland env step had warnings)"
+
+  # Common configs — deployed regardless of desktop.
+  for entry in "${CONFIG_MAP_COMMON[@]}"; do
     name="${entry%%:*}"
     dest="${entry#*:}"
     deploy_one "$name" "$dest"
   done
 
-  # Single-file copies
+  # Desktop-specific config trees.
+  case "$DESKTOP" in
+    i3)
+      for entry in "${CONFIG_MAP_I3[@]}"; do
+        name="${entry%%:*}"
+        dest="${entry#*:}"
+        deploy_one "$name" "$dest"
+      done
+      ;;
+    plasma)
+      for entry in "${CONFIG_MAP_PLASMA[@]}"; do
+        name="${entry%%:*}"
+        dest="${entry#*:}"
+        deploy_one "$name" "$dest"
+      done
+      # Single-file Plasma configs (live at ~/.config/<name>, not under
+      # a subdir).  Each is a direct copy; idempotent re-runs overwrite.
+      local plasma_src="${DOTFILES_DIR}/plasma"
+      local f
+      # kdeglobals / kwinrc / kwinrulesrc / plasmarc / konsolerc /
+      # breezerc — full-file overwrite is safe.  These contain only
+      # OUR theme tunables (cyberpunk colours, kwin desktops/effects,
+      # window rules for conky); plasma's runtime additions go in
+      # other files (plasma-org.kde.plasma.desktop-appletsrc,
+      # kactivitymanagerdrc, …) that we deliberately don't touch.
+      for f in kdeglobals kwinrc kwinrulesrc plasmarc konsolerc breezerc; do
+        if [[ -f "${plasma_src}/${f}" ]]; then
+          install -D -m 0644 "${plasma_src}/${f}" "${HOME}/.config/${f}"
+          ok ".config/${f}"
+        fi
+      done
+
+      # Plasma explicit-sync — must run AFTER the kwinrc install above
+      # so we merge our key into the file we just shipped (not into a
+      # stale plasma-default that the install -D would then overwrite).
+      # No-op when GPU_VENDOR != nvidia (T14 path).  See function header
+      # for the KWin / NVIDIA version-detection rationale.
+      enable_plasma_explicit_sync || warn "(explicit-sync toggle had warnings)"
+
+      # kglobalshortcutsrc gets MERGED, not overwritten, because plasma
+      # auto-populates it with dozens of factory defaults the user
+      # actively relies on:
+      #   • [plasmashell]          — Activities, KRunner (Alt+Space)
+      #   • [org_kde_powerdevil]   — Sleep / Hibernate / Lock / PowerOff
+      #   • [kmix]                 — XF86Audio* volume keys
+      #   • [mediacontrol]         — Play / Pause / Next / Prev keys
+      #   • [KDE Keyboard Layout Switcher]
+      #   • [ksmserver]            — Logout (Ctrl+Alt+Del)
+      # A full-file overwrite would silently nuke all of those.  Use
+      # kwriteconfig6 to surgically set ONLY the keys our shipped
+      # kglobalshortcutsrc owns (Meta+1..4 desktop switching,
+      # Meta+Shift+1..4 window-to-desktop, Meta+Return → alacritty,
+      # Meta+comma/period cycle, Meta+Tab overview, Meta+Q → close
+      # window) plus the plasmashell unbindings that pre-empt
+      # kglobalaccel's conflict resolver (see kglobalshortcutsrc
+      # header comment for why those nones are load-bearing), and
+      # preserve the rest of the file as plasma left it.
+      if [[ -f "${plasma_src}/kglobalshortcutsrc" ]] \
+         && have kwriteconfig6; then
+        local f="${HOME}/.config/kglobalshortcutsrc"
+        local n
+        for n in 1 2 3 4; do
+          kwriteconfig6 --file "$f" --group kwin \
+            --key "Switch to Desktop $n" "Meta+$n,none,Switch to Desktop $n"
+          kwriteconfig6 --file "$f" --group kwin \
+            --key "Window to Desktop $n" "Meta+Shift+$n,none,Window to Desktop $n"
+          # plasma ships these bound to Meta+N by default — kglobalaccel's
+          # conflict resolver picks plasmashell over kwin on tie, which
+          # silently demotes our Switch-to-Desktop bindings.  Force unbind.
+          kwriteconfig6 --file "$f" --group plasmashell \
+            --key "activate task manager entry $n" \
+            "none,none,Activate Task Manager Entry $n"
+        done
+        kwriteconfig6 --file "$f" --group kwin \
+          --key "Switch One Desktop to the Right" \
+          "Meta+period,Meta+Ctrl+Right,Switch One Desktop to the Right"
+        kwriteconfig6 --file "$f" --group kwin \
+          --key "Switch One Desktop to the Left" \
+          "Meta+comma,Meta+Ctrl+Left,Switch One Desktop to the Left"
+        kwriteconfig6 --file "$f" --group kwin \
+          --key "Overview" "Meta+Tab,Meta+W,Toggle Overview"
+        # Close focused window — i3's $mod+Shift+q minus the Shift.
+        # Alt+F4 stays as secondary so legacy workflows still work.
+        kwriteconfig6 --file "$f" --group kwin \
+          --key "Window Close" "Meta+Q,Alt+F4,Close Window"
+        # Plasma ships Meta+Q → Show Activity Switcher by default; clear
+        # it so our Window Close above wins the conflict resolver.
+        kwriteconfig6 --file "$f" --group plasmashell \
+          --key "manage activities" "none,none,Show Activity Switcher"
+        # Plasma ships Meta+. → emojier _launch by default; clear it so
+        # our `Switch One Desktop to the Right` (Meta+period) takes.
+        # kglobalaccel refuses to reassign a service _launch's key on
+        # setShortcut, so this clear is load-bearing for Meta+. — DON'T
+        # remove it without testing the cycle binding still works.
+        kwriteconfig6 --file "$f" --group "services" \
+          --group "org.kde.plasma.emojier.desktop" --key "_launch" \
+          "none,none,Emoji Selector"
+        # services][Alacritty.desktop][_launch] — the canonical Plasma
+        # surface for "global hotkey launches a .desktop file".
+        kwriteconfig6 --file "$f" --group "services" \
+          --group "Alacritty.desktop" --key "_launch" \
+          "Meta+Return,none,Alacritty"
+        # services][cyberpunk-cheatsheet.desktop][_launch] — Meta+/
+        # launches the cheatsheet popup (Plasma equivalent of i3's
+        # `bindsym $mod+slash exec`).  The .desktop file is deployed
+        # to ~/.local/share/applications/ above.
+        kwriteconfig6 --file "$f" --group "services" \
+          --group "cyberpunk-cheatsheet.desktop" --key "_launch" \
+          "Meta+Slash,none,Cyberpunk hotkey cheatsheet"
+        ok ".config/kglobalshortcutsrc (merged via kwriteconfig6)"
+      elif [[ -f "${plasma_src}/kglobalshortcutsrc" ]]; then
+        # Fallback: kwriteconfig6 missing (apt list raced terminal_phase).
+        # Only install if NO existing file — refuse to clobber.
+        if [[ ! -f "${HOME}/.config/kglobalshortcutsrc" ]]; then
+          install -D -m 0644 "${plasma_src}/kglobalshortcutsrc" \
+            "${HOME}/.config/kglobalshortcutsrc"
+          ok ".config/kglobalshortcutsrc (fresh — kwriteconfig6 unavailable)"
+        else
+          warn "kwriteconfig6 missing AND ~/.config/kglobalshortcutsrc"
+          warn "exists — skipping rather than clobber.  Re-run after"
+          warn "\`sudo apt install libkf6config-bin\` (which ships"
+          warn "kwriteconfig6) to apply our hotkey defaults."
+        fi
+      fi
+      # CyberpunkCyan color scheme → ~/.local/share/color-schemes/
+      # Individual file copy (NOT rsync --delete) — that directory is
+      # shared with any color schemes the user installed manually via
+      # System Settings → Colors → Get New… or third-party packages.
+      if [[ -f "${plasma_src}/color-schemes/CyberpunkCyan.colors" ]]; then
+        install -D -m 0644 \
+          "${plasma_src}/color-schemes/CyberpunkCyan.colors" \
+          "${HOME}/.local/share/color-schemes/CyberpunkCyan.colors"
+        ok ".local/share/color-schemes/CyberpunkCyan.colors"
+      fi
+      # Konsole profile + colorscheme → ~/.local/share/konsole/
+      # Same rationale: this directory may have other user-installed
+      # profiles (downloaded from KDE Store, or set up manually); we
+      # only own the two CyberpunkCyan.* files.
+      local kf
+      for kf in CyberpunkCyan.profile CyberpunkCyan.colorscheme; do
+        if [[ -f "${plasma_src}/konsole/${kf}" ]]; then
+          install -D -m 0644 "${plasma_src}/konsole/${kf}" \
+            "${HOME}/.local/share/konsole/${kf}"
+          ok ".local/share/konsole/${kf}"
+        fi
+      done
+      # kscreenlockerrc — templated (@HOME@ → real $HOME for wallpaper path)
+      deploy_templated_file \
+        "${plasma_src}/kscreenlockerrc" \
+        "${HOME}/.config/kscreenlockerrc" 0644
+      # XDG autostart entries — templated.  Both files carry @HOME@ in
+      # their Exec= line because the XDG Desktop Entry spec does NOT
+      # define %h as a field code (the standard ones are %f/%F/%u/%U/
+      # %i/%c/%k); KIO's launcher does not substitute %h and the launch
+      # would fail.  Substituting @HOME@ → real $HOME at deploy time is
+      # the only correct fix here.  apply-theme.sh lives at ~/.config/
+      # plasma/apply-theme.sh and is referenced by cyberpunk-theme.desktop.
+      deploy_templated_file \
+        "${plasma_src}/autostart/conky.desktop" \
+        "${HOME}/.config/autostart/conky.desktop" 0644
+      deploy_templated_file \
+        "${plasma_src}/autostart/cyberpunk-theme.desktop" \
+        "${HOME}/.config/autostart/cyberpunk-theme.desktop" 0644
+      install -D -m 0755 "${plasma_src}/apply-theme.sh" \
+        "${HOME}/.config/plasma/apply-theme.sh"
+      ok ".config/plasma/apply-theme.sh"
+      # kga_push.py — Python helper that apply-theme.sh invokes to
+      # push every kglobalaccel binding over a SINGLE D-Bus session
+      # connection.  Replaces the previous 17-sequential-dbus-send
+      # loop; see comments in apply-theme.sh and kga_push.py.  Needs
+      # python3-dbus (in DESKTOP_PLASMA_PACKAGES) — apply-theme.sh
+      # falls back to the legacy dbus-send loop if the import fails.
+      install -D -m 0755 "${plasma_src}/kga_push.py" \
+        "${HOME}/.config/plasma/kga_push.py"
+      ok ".config/plasma/kga_push.py"
+      # kscreen-baseline.py — Python helper that apply-theme.sh
+      # invokes to apply per-monitor refresh / VRR / HDR baseline
+      # (D3 + D7).  The baseline JSON itself lives at
+      # ~/.config/dotfiles/kscreen-baseline.json and is intentionally
+      # NOT in the repo — it's per-machine state generated by the
+      # user via `kscreen-baseline.py --snapshot` after configuring
+      # monitors in System Settings → Display.  See the script's
+      # docstring for the two-phase usage model.
+      install -D -m 0755 "${plasma_src}/kscreen-baseline.py" \
+        "${HOME}/.config/plasma/kscreen-baseline.py"
+      ok ".config/plasma/kscreen-baseline.py"
+      # cheatsheet.sh — Meta+/ popup script that re-renders the
+      # cyberpunk-dotfiles shortcuts table from ~/.config/
+      # kglobalshortcutsrc each invocation (single source of truth).
+      install -D -m 0755 "${plasma_src}/cheatsheet.sh" \
+        "${HOME}/.config/plasma/cheatsheet.sh"
+      ok ".config/plasma/cheatsheet.sh"
+      # cyberpunk-cheatsheet.desktop — templated like the autostart
+      # entries because its Exec= line carries @HOME@ (XDG Desktop
+      # Entry spec has no %h field code).  Deployed to
+      # ~/.local/share/applications/ so kglobalaccel can resolve the
+      # `[services][cyberpunk-cheatsheet.desktop] _launch=Meta+/`
+      # entry in kglobalshortcutsrc.
+      deploy_templated_file \
+        "${plasma_src}/cyberpunk-cheatsheet.desktop" \
+        "${HOME}/.local/share/applications/cyberpunk-cheatsheet.desktop" 0644
+      ;;
+  esac
+
+  # Single-file copies — common to both desktops.
   local gtk2_src="${DOTFILES_DIR}/gtk-2.0/gtkrc"
   [[ -f "$gtk2_src" ]] && { cp "$gtk2_src" "${HOME}/.gtkrc-2.0"; ok ".gtkrc-2.0"; }
 
-  local xsess="${SCRIPTS_DIR}/xsession.sh"
-  if [[ -f "$xsess" ]]; then
-    install -m 0755 "$xsess" "${HOME}/.xsession"
-    ok ".xsession"
+  # ~/.xsession is X11-only — only deploy on the i3 path.  Under SDDM +
+  # Plasma Wayland session, ~/.xsession is ignored anyway, but leaving
+  # a stale one around can confuse a misbehaving session-picker.
+  if [[ "$DESKTOP" == "i3" ]]; then
+    local xsess="${SCRIPTS_DIR}/xsession.sh"
+    if [[ -f "$xsess" ]]; then
+      install -m 0755 "$xsess" "${HOME}/.xsession"
+      ok ".xsession"
+    fi
+    local xres="${SCRIPTS_DIR}/Xresources"
+    [[ -f "$xres" ]] && { cp "$xres" "${HOME}/.Xresources"; ok ".Xresources"; }
   fi
-
-  local xres="${SCRIPTS_DIR}/Xresources"
-  [[ -f "$xres" ]] && { cp "$xres" "${HOME}/.Xresources"; ok ".Xresources"; }
 
   local zshrc_src="${DOTFILES_DIR}/zsh/.zshrc"
   [[ -f "$zshrc_src" ]] && { cp "$zshrc_src" "${HOME}/.zshrc"; ok ".zshrc"; }
 
   # Mark every shell helper executable.  rsync usually preserves perms,
   # but if anything came in via scp or a manual copy the +x bit can be
-  # lost — re-applying it here is cheap and idempotent.
+  # lost — re-applying it here is cheap and idempotent.  Each chmod is
+  # guarded with `2>/dev/null || true` so missing-on-this-desktop paths
+  # (e.g. polybar/lockscreen on plasma) don't fail the deploy.
   chmod +x "${HOME}/.config/polybar/launch.sh"      2>/dev/null || true
   chmod +x "${HOME}/.config/conky/launch.sh"        2>/dev/null || true
   chmod +x "${HOME}/.config/lockscreen/lock.sh"     2>/dev/null || true
   chmod +x "${HOME}/.config/wallpaper/download_wallpaper.sh" 2>/dev/null || true
   chmod +x "${HOME}/.config/i3/scripts/"*.sh        2>/dev/null || true
   chmod +x "${HOME}/.config/polybar/scripts/"*.sh   2>/dev/null || true
+  chmod +x "${HOME}/.config/plasma/apply-theme.sh"  2>/dev/null || true
+  chmod +x "${HOME}/.config/plasma/cheatsheet.sh"   2>/dev/null || true
+  chmod +x "${HOME}/.config/plasma/kga_push.py"     2>/dev/null || true
 
   # SECURITY: WireGuard config files contain a private key in cleartext.
   # `wg-quick` actually refuses to bring an interface up if the .conf is
@@ -1233,13 +2265,18 @@ deploy_phase() {
   [[ -f "${HOME}/.zsh_history" ]] && chmod 600 "${HOME}/.zsh_history" \
     2>/dev/null || true
 
-  patch_picom_backend
+  # Desktop-specific config patches.
+  case "$DESKTOP" in
+    i3)     patch_picom_backend ;;
+    plasma) patch_conky_window_type ;;
+  esac
 
   # Wallpaper: prefer the curated Unsplash hacker image
   # (download_wallpaper.sh, SHA-256 pinned).  If the download fails —
   # offline install, CDN unreachable, hash mismatch the user hasn't
   # acked — fall back to the procedural Pillow generator so we always
-  # leave ~/.config/wallpaper/wallpaper.png in place.
+  # leave ~/.config/wallpaper/wallpaper.png in place.  The same PNG is
+  # consumed by feh (i3) and Plasma (kscreenlockerrc + apply-theme.sh).
   if [[ -x "${HOME}/.config/wallpaper/download_wallpaper.sh" ]] \
        && bash "${HOME}/.config/wallpaper/download_wallpaper.sh" \
             >"${LOG_DIR}/wallpaper.log" 2>&1; then
@@ -1257,9 +2294,11 @@ deploy_phase() {
 
   mkdir -p "${HOME}/Pictures"
 
-  # Hyper-V Xorg config (only on Hyper-V)
+  # Hyper-V Xorg config — only meaningful on Hyper-V with the i3/Xorg
+  # stack.  Under plasma+Wayland Hyper-V there's no Xorg config to write;
+  # plasma users on Hyper-V should rely on the hyperv-daemons + KMS.
   local hv_src="${DOTFILES_DIR}/xorg.conf.d/10-hyperv.conf"
-  if [[ "$VIRT_TYPE" == "hyperv" && -f "$hv_src" ]]; then
+  if [[ "$VIRT_TYPE" == "hyperv" && "$DESKTOP" == "i3" && -f "$hv_src" ]]; then
     log "Deploying Hyper-V Xorg config …"
     sudo install -d /etc/X11/xorg.conf.d
     sudo install -m 0644 "$hv_src" /etc/X11/xorg.conf.d/10-hyperv.conf
@@ -1268,53 +2307,85 @@ deploy_phase() {
     sudo rm -f /etc/X11/xorg.conf.d/10-hyperv.conf 2>/dev/null || true
   fi
 
-  # LightDM greeter — template substitution.  The repo file is
-  # `lightdm-gtk-greeter.conf.in` with `@HOME@` placeholders so no
-  # per-user path lives in git.  We substitute and install in one step.
-  #
-  # Substitution is done in Python (`str.replace`) because every
-  # text-processing tool we tried first turned out to have a special-
-  # character footgun in its replacement string:
-  #   • sed s|x|y|g   — `&`, `\`, the delimiter all need escaping.
-  #   • awk gsub      — `&` means "the matched text", `\` is escape.
-  #   • bash ${//x/y} — bash 5.2 (Debian 13) added `&` backreferences
-  #                     to match `sed`/`awk` semantics.
-  # `str.replace` is pure substring replacement — no regex, no escapes,
-  # robust against any character $HOME might contain.  python3 is
-  # already on disk before deploy_phase runs (BASE_PACKAGES → python3-pil).
-  local lightdm_in="${DOTFILES_DIR}/lightdm/lightdm-gtk-greeter.conf.in"
-  if [[ -f "$lightdm_in" ]]; then
-    local lightdm_tmp
-    lightdm_tmp="$(mktemp)" || die "mktemp failed for lightdm template"
-    # shellcheck disable=SC2064  # capture $lightdm_tmp value, not name
-    trap "rm -f '$lightdm_tmp'" RETURN
-    HOME="$HOME" LIGHTDM_IN="$lightdm_in" python3 -c '
-import os, sys
-sys.stdout.write(
-    open(os.environ["LIGHTDM_IN"]).read()
-    .replace("@HOME@", os.environ["HOME"])
-)
-' > "$lightdm_tmp" \
-      || die "lightdm template substitution failed"
-    sudo install -m 0644 "$lightdm_tmp" /etc/lightdm/lightdm-gtk-greeter.conf
-    ok "lightdm greeter config (templated for ${HOME})"
-  fi
+  # Display manager + greeter config — split by $DESKTOP.
+  case "$DESKTOP" in
+    i3)
+      # LightDM greeter — template substitution.  See deploy_templated_file
+      # for why this uses python3 str.replace and not sed/awk/bash.
+      deploy_templated_file \
+        "${DOTFILES_DIR}/lightdm/lightdm-gtk-greeter.conf.in" \
+        "/etc/lightdm/lightdm-gtk-greeter.conf" 0644
 
-  # If xrdp happens to be installed (manually), wire it up to ~/.xsession
-  if dpkg -l xrdp 2>/dev/null | grep -q '^ii'; then
-    log "xrdp detected — configuring (start service, add ssl-cert group)"
-    sudo usermod -aG ssl-cert "$USER" 2>/dev/null || true
-    sudo usermod -aG ssl-cert xrdp  2>/dev/null || true
-    sudo systemctl enable --now xrdp 2>/dev/null || true
-    sudo systemctl restart xrdp 2>/dev/null || true
-    ok "xrdp configured"
-  else
-    log "xrdp not installed (intentional) — skipping"
-  fi
+      # If xrdp happens to be installed (manually), wire it up to ~/.xsession
+      if dpkg -l xrdp 2>/dev/null | grep -q '^ii'; then
+        log "xrdp detected — configuring (start service, add ssl-cert group)"
+        sudo usermod -aG ssl-cert "$USER" 2>/dev/null || true
+        sudo usermod -aG ssl-cert xrdp  2>/dev/null || true
+        sudo systemctl enable --now xrdp 2>/dev/null || true
+        sudo systemctl restart xrdp 2>/dev/null || true
+        ok "xrdp configured"
+      else
+        log "xrdp not installed (intentional) — skipping"
+      fi
 
-  log "Enabling lightdm …"
-  sudo systemctl enable lightdm >/dev/null 2>&1 || true
-  ok "lightdm enabled (run \`sudo systemctl start lightdm\` to start now)"
+      # Disable sddm (if a prior plasma install left it enabled) BEFORE
+      # enabling lightdm.  display-manager.service is a single-target
+      # systemd alias; whichever DM was enabled last "wins" the symlink,
+      # so two enabled DMs leaves the boot session ambiguous.  Symmetric
+      # to the lightdm-disable in the plasma branch below.
+      if systemctl list-unit-files sddm.service 2>/dev/null | grep -q '^sddm.service'; then
+        sudo systemctl disable sddm >/dev/null 2>&1 || true
+        ok "sddm disabled"
+      fi
+
+      log "Enabling lightdm …"
+      sudo systemctl enable lightdm >/dev/null 2>&1 || true
+      ok "lightdm enabled (run \`sudo systemctl start lightdm\` to start now)"
+      ;;
+    plasma)
+      # SDDM dropin (Wayland default session, breeze theme) — root-owned.
+      local sddm_src="${DOTFILES_DIR}/sddm/10-wayland.conf"
+      if [[ -f "$sddm_src" ]]; then
+        sudo install -d -m 0755 /etc/sddm.conf.d
+        sudo install -m 0644 "$sddm_src" /etc/sddm.conf.d/10-wayland.conf
+        ok "/etc/sddm.conf.d/10-wayland.conf"
+      fi
+
+      # Disable lightdm (if present from a previous i3 install) BEFORE
+      # enabling sddm — two DMs both `enabled` leaves systemd ambiguous
+      # about which one display-manager.service should point at.
+      if systemctl list-unit-files lightdm.service 2>/dev/null | grep -q '^lightdm.service'; then
+        sudo systemctl disable lightdm >/dev/null 2>&1 || true
+        ok "lightdm disabled"
+      fi
+
+      log "Enabling sddm …"
+      sudo systemctl enable sddm >/dev/null 2>&1 || true
+      ok "sddm enabled (run \`sudo systemctl start sddm\` to start now)"
+
+      # Live-apply theme + wallpaper if plasmashell is already running
+      # (e.g. re-deploying from a plasma session).  Otherwise the
+      # cyberpunk-theme.desktop autostart entry picks it up on first
+      # plasma login.  Both paths are idempotent.
+      if [[ -x "${HOME}/.config/plasma/apply-theme.sh" ]]; then
+        "${HOME}/.config/plasma/apply-theme.sh" || true
+      fi
+      ;;
+  esac
+
+  # Mobile-only system hooks — chassis-gated inside each helper.  Runs
+  # AFTER the desktop deploy so an `--desktop=plasma` Plasma session is
+  # already in place to talk to (kscreen-doctor needs a Plasma session
+  # bus to be useful).  No-op on desktops / VMs.
+  deploy_suspend_hook
+  deploy_dock_handler
+
+  # Per-host overrides — final layer.  See apply_local_overrides() for
+  # the rationale + DOTFILES_NO_LOCAL escape hatch.  Runs AFTER all
+  # other deploy steps so it overlays cleanly over both common +
+  # desktop-specific configs, including the Plasma single-file writes
+  # above.  Tightly scoped to ~/.config/.
+  apply_local_overrides
 }
 
 # ============================================================
@@ -1710,27 +2781,17 @@ terminal_phase() {
 # ============================================================
 # Validation
 # ============================================================
-declare -a VAL_CHECKS=(
+# Common checks — relevant under either desktop.  Terminal stack, CLI
+# tooling, VPN, network backbone, hardware diagnostics.
+declare -a VAL_CHECKS_COMMON=(
   # Use `sudo -ln` (list permissions) — exits 0 whenever the user has
   # ANY passwordless capability, so this works in both broad-sudo
   # (install mode) and narrow-sudo (post-harden) configurations.
   # `sudo -n true` would have falsely failed on a hardened system because
   # /usr/bin/true isn't on the narrow allowlist.
   "sudo (NOPASSWD)|sudo -ln 2>/dev/null | grep -q NOPASSWD"
-  "i3|command -v i3"
-  "polybar|command -v polybar"
-  "picom|command -v picom"
-  "rofi|command -v rofi"
   "alacritty|command -v alacritty"
-  "dunst|command -v dunst"
-  "feh|command -v feh"
-  "lightdm enabled|systemctl is-enabled lightdm"
-  "~/.xsession|test -x ${HOME}/.xsession"
-  "~/.config/i3/config|test -f ${HOME}/.config/i3/config"
   "wallpaper|test -f ${HOME}/.config/wallpaper/wallpaper.png"
-  "lockscreen script|test -x ${HOME}/.config/lockscreen/lock.sh"
-  "rofi config|test -f ${HOME}/.config/rofi/config.rasi"
-  "polybar config|test -f ${HOME}/.config/polybar/config.ini"
   "tmux|command -v tmux"
   "neovim|command -v nvim"
   "zsh|command -v zsh"
@@ -1754,11 +2815,7 @@ declare -a VAL_CHECKS=(
   "mullvad daemon|systemctl is-active mullvad-daemon"
   "wg-quick|command -v wg-quick"
   "wg|command -v wg"
-  "polybar mullvad-status|test -x ${HOME}/.config/polybar/scripts/mullvad-status.sh"
-  "polybar wireguard-status|test -x ${HOME}/.config/polybar/scripts/wireguard-status.sh"
   "NetworkManager active|systemctl is-active NetworkManager"
-  "nm-applet|command -v nm-applet"
-  "nm-connection-editor|command -v nm-connection-editor"
   "nmcli|command -v nmcli"
   # iw / rfkill / powertop / tlp-stat live in /usr/sbin, which is NOT on
   # a non-root user's PATH on Debian (see /etc/profile).  Fall back to a
@@ -1770,6 +2827,66 @@ declare -a VAL_CHECKS=(
   "powertop|command -v powertop || test -x /usr/sbin/powertop"
   "fwupd|command -v fwupdmgr || test -x /usr/bin/fwupdmgr"
   "direnv|command -v direnv"
+)
+
+# i3 path — X11 stack: WM, compositor, bar, launcher, notifications,
+# screenshot, DM, lockscreen script, polybar helper scripts.
+declare -a VAL_CHECKS_I3=(
+  "i3|command -v i3"
+  "polybar|command -v polybar"
+  "picom|command -v picom"
+  "rofi|command -v rofi"
+  "dunst|command -v dunst"
+  "feh|command -v feh"
+  "lightdm enabled|systemctl is-enabled lightdm"
+  "~/.xsession|test -x ${HOME}/.xsession"
+  "~/.config/i3/config|test -f ${HOME}/.config/i3/config"
+  "lockscreen script|test -x ${HOME}/.config/lockscreen/lock.sh"
+  "rofi config|test -f ${HOME}/.config/rofi/config.rasi"
+  "polybar config|test -f ${HOME}/.config/polybar/config.ini"
+  "polybar mullvad-status|test -x ${HOME}/.config/polybar/scripts/mullvad-status.sh"
+  "polybar wireguard-status|test -x ${HOME}/.config/polybar/scripts/wireguard-status.sh"
+  "nm-applet|command -v nm-applet"
+  "nm-connection-editor|command -v nm-connection-editor"
+)
+
+# Plasma path — KDE Plasma 6 Wayland: WM/compositor (kwin_wayland), DM
+# (sddm), native apps, pipewire audio, Wayland clipboard, and deployed
+# theme/config files.  Checks that lightdm has been disabled (otherwise
+# display-manager.service is ambiguous — both DMs claim the alias).
+declare -a VAL_CHECKS_PLASMA=(
+  "plasma-desktop|dpkg -l plasma-desktop 2>/dev/null | grep -q '^ii'"
+  "kwin_wayland|command -v kwin_wayland"
+  "kwin_x11 (VM fallback)|command -v kwin_x11"
+  "systemsettings (GUI config)|command -v systemsettings"
+  "kscreen (display config — required for monitor setup)|dpkg -l kscreen 2>/dev/null | grep -q '^ii'"
+  "powerdevil (power mgmt)|dpkg -l powerdevil 2>/dev/null | grep -q '^ii'"
+  "xdg-desktop-portal-kde|dpkg -l xdg-desktop-portal-kde 2>/dev/null | grep -q '^ii'"
+  "breeze-gtk-theme|dpkg -l breeze-gtk-theme 2>/dev/null | grep -q '^ii'"
+  "sddm enabled|systemctl is-enabled sddm"
+  "lightdm not active|! systemctl is-enabled lightdm 2>/dev/null | grep -qx enabled"
+  "konsole|command -v konsole"
+  "dolphin|command -v dolphin"
+  "kde-spectacle|command -v spectacle"
+  "kwallet6|dpkg -l kwallet6 2>/dev/null | grep -q '^ii'"
+  "polkit-kde-agent-1|test -x /usr/bin/polkit-kde-authentication-agent-1 || test -x /usr/libexec/polkit-kde-authentication-agent-1"
+  "pipewire-pulse|command -v pipewire-pulse"
+  "wireplumber|command -v wireplumber"
+  "wl-clipboard|command -v wl-copy"
+  "qt6-wayland|test -f /usr/lib/x86_64-linux-gnu/qt6/plugins/platforms/libqwayland-generic.so || test -f /usr/lib/qt6/plugins/platforms/libqwayland-generic.so"
+  "Xwayland|command -v Xwayland"
+  "plasma-nm|test -f /usr/lib/x86_64-linux-gnu/qt6/plugins/plasma/applets/plasma_applet_org.kde.plasma.networkmanagement.so || dpkg -l plasma-nm 2>/dev/null | grep -q '^ii'"
+  "plasma-pa|dpkg -l plasma-pa 2>/dev/null | grep -q '^ii'"
+  "kdeglobals|test -f ${HOME}/.config/kdeglobals"
+  "kwinrc|test -f ${HOME}/.config/kwinrc"
+  "kwinrulesrc (conky pin)|test -f ${HOME}/.config/kwinrulesrc"
+  "kscreenlockerrc|test -f ${HOME}/.config/kscreenlockerrc"
+  "CyberpunkCyan color scheme|test -f ${HOME}/.local/share/color-schemes/CyberpunkCyan.colors"
+  "konsole CyberpunkCyan profile|test -f ${HOME}/.local/share/konsole/CyberpunkCyan.profile"
+  "apply-theme.sh|test -x ${HOME}/.config/plasma/apply-theme.sh"
+  "conky autostart|test -f ${HOME}/.config/autostart/conky.desktop"
+  "cyberpunk-theme autostart|test -f ${HOME}/.config/autostart/cyberpunk-theme.desktop"
+  "/etc/sddm.conf.d/10-wayland.conf|test -f /etc/sddm.conf.d/10-wayland.conf"
 )
 
 # ============================================================
@@ -1931,6 +3048,22 @@ unharden_ufw() {
 }
 
 # --- 3. Unattended-upgrades ---------------------------------
+# Two files live in /etc/apt/apt.conf.d/:
+#   • 50unattended-upgrades — WHAT to upgrade (origins, blacklists, mail,
+#     reboot policy).  Shipped as config/system/etc/apt/apt.conf.d/...
+#     and installed verbatim via `sudo install -m 0644`.
+#   • 20auto-upgrades       — WHETHER the periodic timer fires daily.
+#     Generated inline here because it's a 3-line file with no per-host
+#     variability worth tracking in the repo.
+#
+# Rollback (after harden):
+#   sudo rm /etc/apt/apt.conf.d/20auto-upgrades
+#   sudo apt-get install --reinstall unattended-upgrades   # restore distro 50-file
+#
+# Email notifications: configured only if `mailx` is on the host.  Without
+# mailx, MailReport would queue messages into /var/mail/root that never
+# get delivered — journal logs (`journalctl -u unattended-upgrades`) are
+# the audit trail in that case.
 harden_uu() {
   log "Enabling unattended-upgrades for Debian-Security only…"
   if ! dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
@@ -1938,9 +3071,37 @@ harden_uu() {
       unattended-upgrades apt-listchanges >"${LOG_DIR}/apt_uu.log" 2>&1 \
       || { warn "unattended-upgrades install failed"; return 1; }
   fi
-  # The default 50unattended-upgrades file already restricts to security;
-  # we just turn on the periodic timer that drives it.
-  sudo tee /etc/apt/apt.conf.d/20auto-upgrades >/dev/null <<'EOF'
+  # Drop the security-only origin policy.  The repo file is canonical;
+  # use `sudo install` (NOT `cp`) so mode + ownership are predictable.
+  local src50="${DOTFILES_DIR}/system/etc/apt/apt.conf.d/50unattended-upgrades"
+  if [[ -f "$src50" ]]; then
+    sudo install -D -m 0644 -o root -g root "$src50" \
+         /etc/apt/apt.conf.d/50unattended-upgrades
+    ok "/etc/apt/apt.conf.d/50unattended-upgrades (security-only origins)"
+  else
+    warn "${src50} missing — keeping distro default 50unattended-upgrades"
+  fi
+  # Mail-on-change ONLY if mailx is present.  Drop-in is a separate file
+  # so it's easy to spot in `ls /etc/apt/apt.conf.d/` and trivially
+  # removable by hand.
+  if have mailx || have bsd-mailx || have s-nail; then
+    sudo install -D -m 0644 /dev/stdin \
+         /etc/apt/apt.conf.d/51unattended-upgrades-mail <<EOF
+// Generated by ./local_setup.sh harden — root mail is delivered locally
+// via mailx.  Edit the address below to forward off-box.
+Unattended-Upgrade::Mail "root";
+Unattended-Upgrade::MailReport "on-change";
+EOF
+    ok "/etc/apt/apt.conf.d/51unattended-upgrades-mail (mailx present)"
+  else
+    sudo rm -f /etc/apt/apt.conf.d/51unattended-upgrades-mail
+    log "  (no mailx — mail disabled; use \`journalctl -u unattended-upgrades\`)"
+  fi
+  # Drive the periodic timer.  Daily apt update + daily upgrade.
+  sudo install -D -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// Generated by ./local_setup.sh harden.
+// Remove this file (or set values to "0") to halt automatic upgrades:
+//     sudo rm /etc/apt/apt.conf.d/20auto-upgrades
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
@@ -1951,68 +3112,226 @@ EOF
 
 unharden_uu() {
   log "Disabling unattended-upgrades…"
-  sudo tee /etc/apt/apt.conf.d/20auto-upgrades >/dev/null <<'EOF'
+  sudo install -D -m 0644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF
+  sudo rm -f /etc/apt/apt.conf.d/51unattended-upgrades-mail
   sudo systemctl disable --now unattended-upgrades.service >/dev/null 2>&1 || true
   ok "unattended-upgrades disabled"
 }
 
-# --- 4. systemd-resolved + Quad9 DoT ------------------------
-# Quad9 chosen for the malware-blocking + privacy-preserving defaults
-# (no logging in EU operations, fast, supports DoT and DNSSEC).  The
-# user can swap to Cloudflare/Google by editing the conf file.
-harden_dns() {
-  log "Configuring systemd-resolved with Quad9 DoT + DNSSEC …"
-  if ! command -v resolvectl >/dev/null 2>&1; then
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-resolved \
-      >"${LOG_DIR}/apt_resolved.log" 2>&1 \
-      || { warn "systemd-resolved install failed"; return 1; }
+# --- 3b. auditd rules ---------------------------------------
+# Drop /etc/audit/rules.d/dotfiles.rules from the repo and ask augenrules
+# to reload.  On Debian 13, `augenrules --load` is the canonical apply
+# step — it concatenates everything under rules.d/ and atomically swaps
+# /etc/audit/audit.rules, then nudges auditd.  Falls back to a service
+# restart if augenrules is unavailable (very old systems).
+#
+# Rule contents live in config/system/etc/audit/rules.d/dotfiles.rules.
+# To grep for events afterward:
+#   sudo ausearch -k identity      # passwd/shadow/group writes
+#   sudo ausearch -k sudoers       # sudoers edits
+#   sudo ausearch -k modules       # kernel module load/unload
+#   sudo ausearch -k mount         # mount/umount syscalls
+#   sudo ausearch -k privesc       # sudo/su exec — OPT-IN, see rules file
+harden_auditd() {
+  log "Configuring auditd rules (identity, sudoers, modules, mount)…"
+  if ! dpkg -l auditd 2>/dev/null | grep -q '^ii'; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      auditd audispd-plugins >"${LOG_DIR}/apt_auditd.log" 2>&1 \
+      || { warn "auditd install failed — see ${LOG_DIR}/apt_auditd.log"; return 1; }
   fi
-  sudo install -d -m 0755 /etc/systemd/resolved.conf.d
-  sudo tee /etc/systemd/resolved.conf.d/dnsovertls.conf >/dev/null <<'EOF'
-# Managed by ./local_setup.sh harden.
-# Quad9 (9.9.9.9) blocks known-malicious domains and runs in low-log
-# Switzerland.  149.112.112.112 is its IPv6 / secondary endpoint.
-# Cloudflare's 1.1.1.1 is the fallback if Quad9 is unreachable.
-[Resolve]
-DNS=9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net
-FallbackDNS=1.1.1.1#one.one.one.one
-DNSOverTLS=yes
-DNSSEC=allow-downgrade
-Cache=yes
-DNSStubListener=yes
-EOF
-  # Repoint /etc/resolv.conf at resolved's stub.
-  sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-  # Remove the dhcpcd static line we may have added during the earlier
-  # DNS-recovery step (otherwise dhcpcd will fight resolved every renew).
-  if [[ -f /etc/dhcpcd.conf ]]; then
-    sudo sed -i '/^static domain_name_servers=/d' /etc/dhcpcd.conf
-    grep -q '^nohook resolv.conf' /etc/dhcpcd.conf 2>/dev/null \
-      || echo 'nohook resolv.conf' | sudo tee -a /etc/dhcpcd.conf >/dev/null
+  local src="${DOTFILES_DIR}/system/etc/audit/rules.d/dotfiles.rules"
+  if [[ ! -f "$src" ]]; then
+    warn "${src} missing — refusing to deploy empty audit ruleset"
+    return 1
   fi
-  sudo systemctl enable --now systemd-resolved >/dev/null
-  sudo systemctl restart systemd-resolved
-  ok "DNS → Quad9 over DoT (DNSSEC); resolvectl status to verify"
+  sudo install -D -m 0640 -o root -g root "$src" \
+       /etc/audit/rules.d/dotfiles.rules
+  # Apply.  augenrules is preferred; failure isn't fatal because the
+  # rules will still load on next auditd start.
+  if have augenrules; then
+    if ! sudo augenrules --load >"${LOG_DIR}/augenrules.log" 2>&1; then
+      warn "augenrules --load reported issues — see ${LOG_DIR}/augenrules.log"
+      sudo systemctl restart auditd >/dev/null 2>&1 || true
+    fi
+  else
+    sudo systemctl restart auditd >/dev/null 2>&1 || true
+  fi
+  sudo systemctl enable auditd >/dev/null 2>&1 || true
+  ok "auditd rules loaded (\`sudo auditctl -l\` to inspect, \`ausearch -k <key>\` to query)"
 }
 
-unharden_dns() {
-  log "Reverting DNS to dhcpcd-managed Cloudflare/Google …"
-  sudo rm -f /etc/systemd/resolved.conf.d/dnsovertls.conf
-  sudo systemctl restart systemd-resolved >/dev/null 2>&1 || true
-  if [[ -f /etc/dhcpcd.conf ]]; then
-    sudo sed -i '/^nohook resolv.conf/d' /etc/dhcpcd.conf
-    grep -q '^static domain_name_servers=' /etc/dhcpcd.conf 2>/dev/null \
-      || echo 'static domain_name_servers=1.1.1.1 8.8.8.8' \
-         | sudo tee -a /etc/dhcpcd.conf >/dev/null
+unharden_auditd() {
+  log "Removing dotfiles auditd rules…"
+  if [[ -f /etc/audit/rules.d/dotfiles.rules ]]; then
+    sudo rm -f /etc/audit/rules.d/dotfiles.rules
+    if have augenrules; then
+      sudo augenrules --load >/dev/null 2>&1 || true
+    else
+      sudo systemctl restart auditd >/dev/null 2>&1 || true
+    fi
+    ok "auditd dotfiles.rules removed (other rules.d/ files preserved)"
+  else
+    log "  /etc/audit/rules.d/dotfiles.rules absent — nothing to do"
   fi
-  # Repoint resolv.conf at a plain file dhcpcd will rewrite.
-  sudo rm -f /etc/resolv.conf
-  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' \
-    | sudo tee /etc/resolv.conf >/dev/null
-  ok "DNS reverted to plain UDP via dhcpcd"
+}
+
+# --- 4. systemd-resolved + DNS-over-TLS (opportunistic) ------
+# Goal: encrypted DNS lookups (TCP/853) when the network supports it,
+# graceful fall-back to plain DNS when it doesn't.  The threat model is
+# passive on-path observers on untrusted networks (coffee-shop wifi etc).
+#
+# Why opportunistic, not strict: a strict `DNSOverTLS=yes` policy would
+# break name resolution on any network that blocks TCP/853 -- including
+# captive-portal pages we need to load to even authenticate.  The cost
+# of opportunistic mode is that a hostile network CAN RST-downgrade us
+# to plain DNS; check_dot() in conky/health.py surfaces that state.
+#
+# Why NetworkManager-aware: on Debian, NM owns /etc/resolv.conf by
+# default and rewrites it every connection event.  We drop a
+# `dns=systemd-resolved` conf.d file telling NM to push DNS into
+# resolved via D-Bus instead -- preserves per-link DNS (VPN, corporate)
+# while letting our global DoT settings ride on top.
+#
+# Why hostname-pinned servers (`1.1.1.1#cloudflare-dns.com`): the `#name`
+# is the SNI/cert-CN hint resolved uses to verify the TLS connection.
+# Without it, opportunistic mode can't validate the cert.
+#
+# Per-host overlay: if
+#   ~/.config/dotfiles-local/etc/systemd/resolved.conf.d/cyberpunk-dot.conf
+# exists, that file is deployed instead of the repo template -- useful
+# for hosts on a corporate split-horizon DNS or a Pi-hole.
+harden_dot() {
+  log "Configuring systemd-resolved with opportunistic DoT + DNSSEC …"
+
+  # Step 1: VALIDATE installability BEFORE touching /etc/resolv.conf.
+  # If apt fails halfway through, the user keeps working DNS.  Order
+  # of operations matters here -- a Ctrl-C between the install and the
+  # symlink swap leaves a recoverable state.
+  if ! command -v resolvectl >/dev/null 2>&1; then
+    log "  systemd-resolved not present — installing …"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-resolved \
+      >"${LOG_DIR}/apt_resolved.log" 2>&1 \
+      || { warn "systemd-resolved install failed — see ${LOG_DIR}/apt_resolved.log"; return 1; }
+    ok "  systemd-resolved installed"
+  else
+    log "  systemd-resolved already present"
+  fi
+
+  # Step 2: pick the source file.  Per-host overlay wins so corporate
+  # / Pi-hole hosts can override without committing secrets.
+  local repo_src="${DOTFILES_DIR}/system/etc/systemd/resolved.conf.d/cyberpunk-dot.conf"
+  local local_src="${HOME}/.config/dotfiles-local/etc/systemd/resolved.conf.d/cyberpunk-dot.conf"
+  local src="$repo_src"
+  if [[ -f "$local_src" ]]; then
+    src="$local_src"
+    log "  using per-host overlay: ${local_src}"
+  fi
+  if [[ ! -f "$src" ]]; then
+    warn "${src} missing — refusing to deploy DoT without a template"
+    return 1
+  fi
+
+  # Step 3: deploy resolved drop-in.  `install -D` is atomic at the
+  # file level (write-temp + rename) so a Ctrl-C mid-write can't leave
+  # a half-written conf.
+  sudo install -D -m 0644 -o root -g root "$src" \
+       /etc/systemd/resolved.conf.d/cyberpunk-dot.conf
+  ok "  /etc/systemd/resolved.conf.d/cyberpunk-dot.conf"
+
+  # Step 4: tell NetworkManager to back off /etc/resolv.conf and push
+  # DNS into resolved instead.  Without this NM will overwrite our
+  # symlink on the next connection event.
+  local nm_src="${DOTFILES_DIR}/system/etc/NetworkManager/conf.d/cyberpunk-dns.conf"
+  if [[ -f "$nm_src" ]]; then
+    sudo install -D -m 0644 -o root -g root "$nm_src" \
+         /etc/NetworkManager/conf.d/cyberpunk-dns.conf
+    ok "  /etc/NetworkManager/conf.d/cyberpunk-dns.conf (dns=systemd-resolved)"
+  else
+    warn "${nm_src} missing — NM may overwrite /etc/resolv.conf"
+  fi
+
+  # Step 5: enable + start resolved BEFORE swapping resolv.conf, so
+  # the stub at 127.0.0.53 is actually listening when we point at it.
+  sudo systemctl enable --now systemd-resolved >/dev/null 2>&1 \
+    || { warn "failed to start systemd-resolved"; return 1; }
+  ok "  systemd-resolved running"
+
+  # Step 6: point /etc/resolv.conf at the resolved stub.  `ln -sf` is
+  # atomic on the same filesystem (POSIX-mandated rename semantics) --
+  # there's no window where /etc/resolv.conf doesn't exist.
+  #
+  # Defensive: some hardening guides (Lynis, the resolvconf-immutable
+  # recipe in CIS) suggest `chattr +i /etc/resolv.conf`.  If a user did
+  # that, `ln -sf` returns EPERM and the symlink never gets created --
+  # silently leaving DNS routed to whatever the immutable file says.
+  # Drop the immutable bit first; harmless no-op when not set.  Errors
+  # swallowed because tmpfs/overlay roots don't support chattr at all.
+  if [[ -e /etc/resolv.conf ]] && ! [[ -L /etc/resolv.conf ]]; then
+    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+  fi
+  sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  ok "  /etc/resolv.conf → /run/systemd/resolve/stub-resolv.conf"
+
+  # Step 7: reload NM so it picks up the dns=systemd-resolved setting.
+  # RELOAD, not restart -- restart drops the current connection mid-run.
+  sudo systemctl reload NetworkManager >/dev/null 2>&1 || true
+
+  # Step 8: nudge resolved to re-read the drop-in (it does so on
+  # restart anyway, but we want the new conf live NOW for verification).
+  sudo systemctl restart systemd-resolved >/dev/null 2>&1 || true
+
+  ok "DNS-over-TLS active (opportunistic).  Verify: \`resolvectl status\`"
+  log "  on a network without DoT support this falls back to plain DNS —"
+  log "  check the DoT line in conky/health.py to see which mode is live."
+}
+
+unharden_dot() {
+  log "Reverting systemd-resolved DoT configuration …"
+
+  # Remove our drop-ins first so a service reload doesn't re-apply
+  # them.  Both files are owned by us (not the systemd-resolved
+  # package), so plain rm is safe.
+  if [[ -f /etc/systemd/resolved.conf.d/cyberpunk-dot.conf ]]; then
+    sudo rm -f /etc/systemd/resolved.conf.d/cyberpunk-dot.conf
+    ok "  removed /etc/systemd/resolved.conf.d/cyberpunk-dot.conf"
+  fi
+  if [[ -f /etc/NetworkManager/conf.d/cyberpunk-dns.conf ]]; then
+    sudo rm -f /etc/NetworkManager/conf.d/cyberpunk-dns.conf
+    ok "  removed /etc/NetworkManager/conf.d/cyberpunk-dns.conf"
+  fi
+
+  # Drop the resolv.conf symlink BEFORE stopping resolved.  Otherwise
+  # everything that calls getaddrinfo() between the disable and the NM
+  # reload would silently fail (stub listener gone, no nameserver).
+  if [[ -L /etc/resolv.conf ]]; then
+    sudo rm -f /etc/resolv.conf
+    log "  removed stub symlink at /etc/resolv.conf"
+  fi
+
+  # Reload NetworkManager -- now that the dns= override is gone, NM
+  # reverts to writing /etc/resolv.conf directly with the DHCP-supplied
+  # nameservers from the active connection.  Reload (not restart) keeps
+  # the current connection up.
+  sudo systemctl reload NetworkManager >/dev/null 2>&1 || true
+  # Some NM versions only rewrite resolv.conf on a connection-state
+  # change, not on a config reload.  If the file still isn't there,
+  # kick the active connection to force a rewrite.
+  if [[ ! -e /etc/resolv.conf ]]; then
+    local conn
+    conn=$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)
+    if [[ -n "$conn" ]]; then
+      log "  asking NM to refresh /etc/resolv.conf via 'nmcli connection up'"
+      sudo nmcli connection up "$conn" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Disable resolved last.  If anything above failed, the user still
+  # has the stub listener as a working DNS source while they debug.
+  sudo systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+  ok "DNS-over-TLS reverted (NM now owns /etc/resolv.conf again)"
 }
 
 # --- harden orchestrator ------------------------------------
@@ -2020,34 +3339,46 @@ harden_phase() {
   ensure_sudo
   log "Running security-hardening pass — narrow sudoers, ufw, "
   log "unattended-upgrades, DNS-over-TLS.  Reverse with \`unharden\`."
-  harden_uu  || warn "(unattended-upgrades step had warnings)"
-  harden_dns || warn "(DNS step had warnings)"
-  harden_ufw || warn "(ufw step had warnings)"
-  harden_sudo || die  "(sudoers step failed — refusing to leave system half-hardened)"
+  harden_uu     || warn "(unattended-upgrades step had warnings)"
+  harden_auditd || warn "(auditd step had warnings)"
+  harden_dot    || warn "(DNS-over-TLS step had warnings)"
+  harden_ufw    || warn "(ufw step had warnings)"
+  harden_sudo   || die  "(sudoers step failed — refusing to leave system half-hardened)"
   echo
   ok "Hardening complete."
   log "Verify: \`sudo -l\`, \`sudo ufw status\`, \`resolvectl status\`,"
-  log "        \`systemctl status unattended-upgrades.service\`"
+  log "        \`systemctl status unattended-upgrades.service\`,"
+  log "        \`sudo auditctl -l\` (ausearch -k identity|sudoers|modules|mount)"
 }
 
 unharden_phase() {
   ensure_sudo
   log "Reverting hardening — broad sudoers, ufw off, "
-  log "auto-upgrades off, DNS back to dhcpcd."
+  log "auto-upgrades off, DNS back to NM-managed plain resolvers."
   unharden_sudo
   unharden_ufw
   unharden_uu
-  unharden_dns
+  unharden_auditd
+  unharden_dot
   echo
   ok "Hardening reverted (suitable for re-running setup)."
 }
 
 validate_phase() {
-  log "Running validation checks …"
+  log "Running validation checks (desktop=${DESKTOP}) …"
   echo
   local failures=0
   local entry label cmd
-  for entry in "${VAL_CHECKS[@]}"; do
+
+  # Build the active list: common + desktop-specific.
+  local -a active=()
+  active+=("${VAL_CHECKS_COMMON[@]}")
+  case "$DESKTOP" in
+    i3)     active+=("${VAL_CHECKS_I3[@]}") ;;
+    plasma) active+=("${VAL_CHECKS_PLASMA[@]}") ;;
+  esac
+
+  for entry in "${active[@]}"; do
     label="${entry%%|*}"
     cmd="${entry#*|}"
     if bash -c "$cmd" >/dev/null 2>&1; then
@@ -2111,6 +3442,45 @@ validate_phase() {
     else
       printf "  [FAIL]  nvidia-drm.modeset=1 not on cmdline (reboot required)\n"
       failures=$((failures + 1))
+    fi
+    # NVIDIA-Wayland extras — only meaningful (and only added by
+    # install_phase) on the plasma path.  Each fail message points at
+    # the specific install_phase helper that should have set it.
+    if [[ "$DESKTOP" == "plasma" && "$VIRT_TYPE" == "physical" ]]; then
+      if grep -q 'nvidia-drm\.fbdev=1' /proc/cmdline 2>/dev/null; then
+        printf "  [ ok ]  nvidia-drm.fbdev=1 active on running kernel\n"
+      else
+        printf "  [FAIL]  nvidia-drm.fbdev=1 not on cmdline (reboot required; see add_nvidia_fbdev)\n"
+        failures=$((failures + 1))
+      fi
+      if sudo test -f /etc/modprobe.d/nvidia-power-management.conf \
+         && sudo grep -q 'NVreg_PreserveVideoMemoryAllocations=1' \
+              /etc/modprobe.d/nvidia-power-management.conf 2>/dev/null; then
+        printf "  [ ok ]  NVreg_PreserveVideoMemoryAllocations=1 set\n"
+      else
+        printf "  [FAIL]  NVreg_PreserveVideoMemoryAllocations missing (see add_nvidia_pm_options)\n"
+        failures=$((failures + 1))
+      fi
+      if grep -qE '^[[:space:]]*nvidia_drm([[:space:]]|$)' \
+           /etc/initramfs-tools/modules 2>/dev/null; then
+        printf "  [ ok ]  nvidia early-KMS modules in initramfs\n"
+      else
+        printf "  [FAIL]  nvidia early-KMS modules missing (see add_nvidia_early_kms)\n"
+        failures=$((failures + 1))
+      fi
+      # The three nvidia-suspend units; report any that aren't enabled
+      # (they're independent — older driver packages ship only a subset).
+      local sunit
+      for sunit in nvidia-suspend.service nvidia-resume.service nvidia-hibernate.service; do
+        if systemctl list-unit-files "$sunit" 2>/dev/null | grep -q "^${sunit}"; then
+          if systemctl is-enabled "$sunit" >/dev/null 2>&1; then
+            printf "  [ ok ]  %s enabled\n" "$sunit"
+          else
+            printf "  [FAIL]  %s not enabled (see add_nvidia_pm_options)\n" "$sunit"
+            failures=$((failures + 1))
+          fi
+        fi
+      done
     fi
     # Gaming/workstation userland — only checked on physical hosts
     # where we'd actually have installed it.
@@ -2207,8 +3577,14 @@ describe_stage() {
       cat <<EOF
 This stage will:
   • Run \`apt-get update\` to refresh the package index
-  • Install ~80 desktop & terminal packages (i3, polybar, alacritty,
-    neovim, zsh, picom, dunst, …)
+  • Install the common base packages (alacritty, neovim, zsh, tmux,
+    fonts, network/audio backbone, hardware diagnostics, …)
+  • Install the desktop stack for --desktop=${DESKTOP}:
+      i3      → xorg, i3, polybar, picom, rofi, dunst, lightdm,
+                pulseaudio, i3lock, feh, thunar (X11 stack)
+      plasma  → plasma-desktop, kwin-wayland, sddm, pipewire,
+                xwayland, qt6-wayland, konsole, dolphin,
+                kde-config-screenlocker, wl-clipboard, breeze
   • If GPU detected: install matching driver stack (nvidia/amd/intel).
     For NVIDIA on physical hardware, additionally:
       - Enable i386 multiarch (Steam, Proton, 32-bit games)
@@ -2218,6 +3594,11 @@ This stage will:
       - Append nvidia-drm.modeset=1 to the GRUB cmdline (reboot required)
       - --cuda also installs nvidia-cuda-toolkit (~3 GB, opt-in)
       - --steam also installs steam-installer (Debian's Steam bootstrap)
+    For NVIDIA on physical hardware + --desktop=plasma, also:
+      - Append nvidia-drm.fbdev=1 to the GRUB cmdline
+      - Add nvidia early-KMS modules to initramfs
+      - Set NVreg_PreserveVideoMemoryAllocations=1 in modprobe.d
+      - Enable nvidia-suspend / -resume / -hibernate systemd units
   • If virtualised: install hypervisor guest tools (qemu-guest-agent,
     open-vm-tools, hyperv-daemons, …)
   • Install Mullvad VPN from its official apt repo
@@ -2232,12 +3613,19 @@ EOF
     deploy)
       cat <<EOF
 This stage will:
-  • Copy this repo's ./config/* into ~/.config/
-  • Patch picom backend (xrender for VMs, glx for physical GPUs)
-  • Generate the desktop wallpaper (procedural cyberpunk PNG)
-  • Deploy the Hyper-V Xorg config (only on Hyper-V)
+  • Copy this repo's common ./config/* into ~/.config/ (alacritty,
+    tmux, nvim, starship, wallpaper, conky, gtk-3.0)
+  • Deploy the --desktop=${DESKTOP} configs:
+      i3      → ./config/{i3,polybar,picom,rofi,dunst,lockscreen} +
+                ~/.xsession + lightdm greeter config + lightdm enable
+      plasma  → ./config/plasma/{kdeglobals,kwinrc,kwinrulesrc,
+                plasmarc,konsolerc,kscreenlockerrc,color-schemes/,
+                konsole/,autostart/,apply-theme.sh} +
+                /etc/sddm.conf.d/10-wayland.conf +
+                lightdm disable + sddm enable +
+                conky own_window_type → 'desktop' patch
+  • Generate the desktop wallpaper (Unsplash → procedural fallback)
   • Configure xrdp if it's installed (otherwise skipped)
-  • Enable the lightdm display manager
   • Time: < 30 seconds
 EOF
       ;;
@@ -2333,6 +3721,11 @@ WANT_CUDA=0
 WANT_STEAM=0
 WANT_NIX=1
 WANT_WIFI_TAKEOVER=1
+# Desktop stack selection.  Default is `i3` (the original cyberpunk
+# X11 stack — unchanged for existing users).  `plasma` switches the
+# install_phase + deploy_phase + validate_phase to KDE Plasma 6 on
+# Wayland with SDDM + PipeWire.  See readme/plasma.md.
+DESKTOP="i3"
 # Default for `setup` is INTERACTIVE.  If stdin isn't a TTY (piped, SSH
 # without -t, CI), we silently flip to bypass — otherwise read would hang
 # the entire pipeline waiting for input that's never coming.
@@ -2344,6 +3737,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     setup|detect|install|deploy|terminal|validate|harden|unharden)
       ACTION="$1" ;;
+    --show-overrides)
+      # Read-only inspection of ~/.config/dotfiles-local/.  Implemented
+      # as a flag (not a sub-command) so it composes with --desktop=...
+      # if the user wants to see what would apply for that path.
+      ACTION="show-overrides" ;;
     --hyperv)   FORCE_VIRT="hyperv" ;;
     --vm)       FORCE_VIRT="vm" ;;
     --physical) FORCE_VIRT="physical" ;;
@@ -2356,6 +3754,9 @@ while [[ $# -gt 0 ]]; do
     --steam)      WANT_STEAM=1 ;;
     --no-nix)     WANT_NIX=0 ;;
     --no-wifi-takeover) WANT_WIFI_TAKEOVER=0 ;;
+    --desktop=*)  DESKTOP="${1#--desktop=}" ;;
+    --plasma)     DESKTOP="plasma" ;;
+    --i3)         DESKTOP="i3" ;;
     --interactive|-i)
       [[ "$_MODE_FLAG_SEEN" == "bypass" ]] \
         && die "--interactive and --bypass are mutually exclusive"
@@ -2372,9 +3773,24 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# Validate desktop selection — fail fast before any apt/sudo work.
+case "$DESKTOP" in
+  i3|plasma) ;;
+  *) die "Unknown --desktop=$DESKTOP (expected: i3, plasma)" ;;
+esac
+
 # ============================================================
 # Main
 # ============================================================
+# Read-only sub-commands short-circuit BEFORE detection / sudo / apt.
+# --show-overrides just inspects ~/.config/dotfiles-local/ and exits —
+# no reason to drag the user through `ensure_detection_tools` (which can
+# apt-install lspci/dmidecode on a fresh box) for a 1-second diff.
+if [[ "$ACTION" == "show-overrides" ]]; then
+  show_overrides
+  exit 0
+fi
+
 # Bootstrap detection tools first (lspci / dmidecode) — they live in tiny
 # packages and we need them for the detect_* functions to be accurate on a
 # fresh Debian install.  Skipped on `detect`/`validate` if they're already
@@ -2402,6 +3818,10 @@ case "$ACTION" in
     harden_phase ;;
   unharden)
     unharden_phase ;;
+  show-overrides)
+    # Read-only — no sudo, no apt, no rsync.  Exits straight after.
+    show_overrides
+    exit 0 ;;
   setup)
     # Print mode banner so the user knows which path they're on, and pre-
     # authenticate sudo once.  Both modes go through ensure_sudo here so

@@ -1,0 +1,61 @@
+// /etc/apt/apt.conf.d/50unattended-upgrades
+// Managed by ./local_setup.sh harden.  Hand-edits will be overwritten on
+// the next `harden` run.  To DISABLE automatic updates entirely:
+//
+//     sudo rm /etc/apt/apt.conf.d/20auto-upgrades
+//
+// To restore Debian's default 50unattended-upgrades file:
+//
+//     sudo apt-get install --reinstall -o Dpkg::Options::="--force-confmiss" \
+//          unattended-upgrades
+//
+// Why security-only?  A general "${distro_id}:${distro_codename}-updates"
+// origin would silently bump userspace packages (firefox, libc, kernel)
+// mid-day, which can disrupt a running desktop session in surprising
+// ways.  The dotfiles' opinion is: take only -security and let the user
+// pick when to run `apt-get upgrade` for everything else.
+
+Unattended-Upgrade::Origins-Pattern {
+    // Debian security archive — covers debian-security suite on stable.
+    // BOTH lines are needed: pre-bookworm releases tag with codename=...
+    // and suite=.../updates; bookworm+ moved to codename=...-security.
+    "origin=Debian,codename=${distro_codename},label=Debian-Security";
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+    // NOTE: do NOT add `label=Debian` (without -Security) here — that
+    // matches the whole stable archive and silently upgrades userspace
+    // packages mid-day, which is exactly what the security-only policy
+    // is meant to avoid.
+};
+
+// Packages to never auto-upgrade (kernel + GPU drivers are the usual
+// culprits — they require a coordinated reboot to actually take
+// effect).  Empty by default; uncomment if a particular package is
+// causing trouble.
+Unattended-Upgrade::Package-Blacklist {
+//  "linux-image-.*";
+//  "nvidia-driver";
+};
+
+// Send mail only if /usr/bin/mailx is present AND the user filled in
+// the address below.  ./local_setup.sh injects MailReport=on-change when
+// `mailx` exists on the host; absent mailx, journal is the audit trail
+// (journalctl -u unattended-upgrades.service).
+Unattended-Upgrade::Mail "";
+Unattended-Upgrade::MailReport "on-change";
+
+// Remove dependencies that are no longer needed after the upgrade.
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+
+// Reboot policy: NEVER auto-reboot.  Desktop users are present at the
+// machine and can choose when to reboot for kernel updates.  Server
+// users running `--harden` can flip this to "true" manually.
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+
+// Verbose logs land in /var/log/unattended-upgrades/.  Useful for
+// diagnosing why a package wasn't picked up.
+Unattended-Upgrade::Verbose "false";
+Unattended-Upgrade::Debug "false";

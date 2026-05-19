@@ -1,0 +1,80 @@
+# /etc/udev/rules.d/95-cyberpunk-dock.rules
+#
+# Trigger /usr/local/bin/cyberpunk-dock-handler.sh on USB-C / Thunderbolt
+# dock connect/disconnect.  Loaded after the system rules (numeric prefix
+# 95 puts us late enough that ID_VENDOR_ID / ID_MODEL_ID / ID_SERIAL_SHORT
+# have been populated by usb-id/usb-db builtins).
+#
+# Scope rationale — read this before broadening the match!
+# ──────────────────────────────────────────────────────────────────────
+# We DO NOT match `SUBSYSTEM=="usb", ATTRS{bDeviceClass}=="09"` (USB hub)
+# broadly.  A literal USB-hub match fires for:
+#   • every internal root hub at boot (xhci_hcd registers four-plus)
+#   • every USB keyboard / mouse / webcam that has an internal hub
+#   • every Plasma-aware monitor with a downstream USB-C hub
+# Running our 3-second-sleep handler on each of those would saturate udev
+# workers (`udevd: worker [N] failed`) and re-apply layouts at random.
+#
+# Instead, we match SPECIFIC USB vendor:product IDs known to belong to
+# docks.  Add new dock entries below.  To find your dock's IDs:
+#
+#   lsusb                                            # list everything
+#   udevadm monitor --environment --subsystem-match=usb   # plug it in
+#
+# Once you've added a new ID, reload rules:
+#
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# ──────────────────────────────────────────────────────────────────────
+# Known docks (extend the list as needed):
+#
+#   17ef:3082  Lenovo ThinkPad Universal Thunderbolt 4 Dock (Gen 1)
+#   17ef:3083  Lenovo ThinkPad Universal Thunderbolt 4 Smart Dock
+#   17ef:3070  Lenovo ThinkPad USB-C Dock Gen 2
+#   17ef:a052  Lenovo ThinkPad Hybrid USB-C with USB-A Dock
+#   2109:0817  VIA Labs hub — used by some generic CalDigit / Anker docks
+#
+# `RUN+="…"` invokes our handler with ACTION and a derived dock-hash.
+# The handler itself does the heavy lifting (sleep, kscreen-doctor,
+# laptop-only fallback); the rule's only job is to FIRE narrowly.
+#
+# IMPORTANT: udev's RUN+= executes its target SYNCHRONOUSLY inside the
+# udev worker process, with a strict timeout (180 s) and BLOCKS other
+# udev events queued behind us.  Our handler `sleep 3`s then talks to
+# kscreen-doctor over D-Bus — both are exactly the things udev RUN+=
+# is NOT supposed to do.  Wrap with `systemd-run --no-block` so udev
+# returns immediately and the handler runs untethered as a transient
+# unit (logs: `journalctl -u cyberpunk-dock-*`).
+# ──────────────────────────────────────────────────────────────────────
+
+# Lenovo ThinkPad Universal Thunderbolt 4 Dock (Gen 1) — the T14 Gen 1
+# pairs with this most often.  Both add+remove run the handler; the
+# handler branches on $env{ACTION} (passed as $1) internally.
+SUBSYSTEM=="usb", ACTION=="add|remove", ATTR{idVendor}=="17ef", ATTR{idProduct}=="3082", \
+  RUN+="/usr/bin/systemd-run --no-block --collect /usr/local/bin/cyberpunk-dock-handler.sh %E{ACTION} 17ef-3082-%E{ID_SERIAL_SHORT}"
+
+# Other Lenovo ThinkPad docks (commented out — uncomment whichever
+# applies to your hardware).  Keeping them as commented templates makes
+# the "this dock isn't recognised" diagnosis cheap: lsusb, grep here,
+# uncomment, reload.
+#SUBSYSTEM=="usb", ACTION=="add|remove", ATTR{idVendor}=="17ef", ATTR{idProduct}=="3083", \
+#  RUN+="/usr/bin/systemd-run --no-block --collect /usr/local/bin/cyberpunk-dock-handler.sh %E{ACTION} 17ef-3083-%E{ID_SERIAL_SHORT}"
+#SUBSYSTEM=="usb", ACTION=="add|remove", ATTR{idVendor}=="17ef", ATTR{idProduct}=="3070", \
+#  RUN+="/usr/bin/systemd-run --no-block --collect /usr/local/bin/cyberpunk-dock-handler.sh %E{ACTION} 17ef-3070-%E{ID_SERIAL_SHORT}"
+#SUBSYSTEM=="usb", ACTION=="add|remove", ATTR{idVendor}=="17ef", ATTR{idProduct}=="a052", \
+#  RUN+="/usr/bin/systemd-run --no-block --collect /usr/local/bin/cyberpunk-dock-handler.sh %E{ACTION} 17ef-a052-%E{ID_SERIAL_SHORT}"
+
+# Broad-pattern escape hatch — DISABLED by default.  Some non-Lenovo
+# docks (CalDigit TS4, Anker 777, OWC TB4) expose only a generic VIA /
+# Genesys hub chip with no dock-identifying VID:PID at the USB layer.
+# In that case, the only reliable distinguisher is "USB hub class 09
+# attached AT BOOT VS AT HOTPLUG".  Uncomment the rule below ONLY if
+# none of the explicit matches above apply on your machine — and accept
+# the trade-off that internal-keyboard hubs may also fire this handler.
+#
+#SUBSYSTEM=="usb", ACTION=="add|remove", ATTR{bDeviceClass}=="09", \
+#  ATTR{idVendor}!="1d6b", ATTR{idVendor}!="0000", \
+#  RUN+="/usr/bin/systemd-run --no-block --collect /usr/local/bin/cyberpunk-dock-handler.sh %E{ACTION} %E{ID_VENDOR_ID}-%E{ID_MODEL_ID}-%E{ID_SERIAL_SHORT}"
+#
+# 1d6b excludes Linux Foundation root hubs (xhci-internal), 0000 excludes
+# unprobed hubs during early enumerate.
