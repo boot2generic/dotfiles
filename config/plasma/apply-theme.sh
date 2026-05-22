@@ -36,8 +36,9 @@ set -u
 
 WALLPAPER="${HOME}/.config/wallpaper/wallpaper.png"
 SCHEME="CyberpunkCyan"
-PANEL_HEIGHT="${PANEL_HEIGHT:-28}"           # px; thin but readable
+PANEL_HEIGHT="${PANEL_HEIGHT:-40}"           # px; taller = more modern, easier hit targets
 PANEL_HIDING="${PANEL_HIDING:-autohide}"     # autohide|none|dodgewindows|windowsbelow
+PANEL_FLOATING="${PANEL_FLOATING:-true}"     # true = floating pill style (Plasma 6 feature)
 DEFAULT_SCALE="${DEFAULT_SCALE:-1}"          # 100% = 1, 125% = 1.25, …
 
 # ── Env-var whitelist ──────────────────────────────────────────────
@@ -60,6 +61,13 @@ if [[ ! "$PANEL_HEIGHT" =~ ^[0-9]{1,3}$ ]] || (( PANEL_HEIGHT < 16 || PANEL_HEIG
     echo "[!]  PANEL_HEIGHT='$PANEL_HEIGHT' invalid — need an integer 16..200 px" >&2
     exit 2
 fi
+case "$PANEL_FLOATING" in
+    true|false) : ;;
+    *)
+        echo "[!]  PANEL_FLOATING='$PANEL_FLOATING' invalid — must be true or false" >&2
+        exit 2
+        ;;
+esac
 # DEFAULT_SCALE: kscreen-doctor accepts decimal scale factors; same
 # defence-in-depth rationale — it flows into `kscreen-doctor "output.X.scale.$DEFAULT_SCALE"`
 # which is argv only (no shell), but spurious values would just fail.
@@ -297,6 +305,50 @@ if have plasma-apply-desktoptheme; then
     plasma-apply-desktoptheme breeze-dark >/dev/null 2>&1 || true
 fi
 
+# ───────────────────────────────────────────────────────────────────
+# Icon theme — Papirus-Dark.
+#
+# Papirus-Dark is a flat, monochrome-friendly icon pack that reads
+# cleanly against deep-navy/black backgrounds — much more cyberpunk
+# than breeze-dark's literal icon style.  papirus-icon-theme is in
+# BASE_PACKAGES so it's guaranteed present.
+#
+# We write directly via kwriteconfig6 rather than relying on
+# plasma-apply-* — there is no plasma-apply-icontheme command in
+# Plasma 6.  The new value takes effect on the next plasmashell
+# restart or re-login; the D-Bus broadcast below nudges already-
+# running Qt apps (file manager, etc.) to reload without a restart.
+# ───────────────────────────────────────────────────────────────────
+if have kwriteconfig6; then
+    kwriteconfig6 --file kdeglobals --group Icons --key Theme Papirus-Dark
+    echo "[ok] icon theme: Papirus-Dark"
+fi
+# Broadcast KIconLoader reload so running apps pick it up immediately
+# (file manager, plasmoid icon caches, etc.).
+if have dbus-send; then
+    dbus-send --session --type=signal /KIconLoader \
+        org.kde.KIconLoader.newIconLoader 2>/dev/null || true
+fi
+
+# ───────────────────────────────────────────────────────────────────
+# papirus-folders — recolor Papirus folder icons to our cyan accent.
+#
+# papirus-folders is a small bash script (not in Debian Bookworm's
+# default repos; install via `sudo apt install papirus-folders` on
+# Trixie or via install_papirus_folders() in local_setup.sh).
+# Runs against the user's local copy in ~/.local/share/icons first,
+# then the system copy.  Best-effort: a missing binary is a soft
+# warning, not a failure.
+# ───────────────────────────────────────────────────────────────────
+if have papirus-folders; then
+    papirus-folders --color cyan --theme Papirus-Dark >/dev/null 2>&1 \
+        && echo "[ok] Papirus folder icons: cyan" \
+        || echo "[!]  papirus-folders failed — folder icons use Papirus defaults"
+else
+    echo "[*]  papirus-folders not installed — run install_papirus_folders() or"
+    echo "     \`sudo apt install papirus-folders\` (Trixie+) for cyan folder icons"
+fi
+
 # Look-and-feel package — pulls in breeze-dark globally (window
 # decoration + splash + lockscreen styling).  No-op if already set.
 #
@@ -371,25 +423,50 @@ if pgrep -x plasmashell >/dev/null 2>&1; then
     done
     if [[ -n "$qdbus_bin" ]]; then
         # Heredoc → variable so we can interpolate $PANEL_HEIGHT /
-        # $PANEL_HIDING into the JS.  The script silently no-ops on
-        # any panel that isn't a horizontal/vertical containment.
+        # $PANEL_HIDING / $PANEL_FLOATING into the JS.  The script
+        # silently no-ops on any panel that isn't a horizontal/vertical
+        # containment.
         #
-        # Battery widget (org.kde.plasma.battery) is added as a top-
-        # level panel applet — separate from the systray's auto-hidden
-        # battery icon so it's ALWAYS visible (the polybar wlan-pill
-        # equivalent for power state on the i3 path).  Guarded by
-        # iterating widgetIds so re-runs don't pile up duplicate
-        # battery widgets.  On a desktop with no battery the widget
-        # falls back to showing the AC adapter icon — useful UX, not
-        # a wasted slot.
+        # Widget changes performed (all idempotent):
+        #   1. Swap org.kde.plasma.taskmanager → org.kde.plasma.icontasks
+        #      (dock-style icons-only task manager — modern pill look).
+        #      Records the old widget's index, removes it, inserts the
+        #      new widget at the same index so the panel layout stays
+        #      intact.  Skips if icontasks is already present.
+        #   2. Add org.kde.plasma.battery as a top-level panel applet —
+        #      always visible, separate from the systray's auto-hidden
+        #      battery icon.  No-op on a desktop (shows AC adapter icon).
         script="$(cat <<EOF
 var allPanels = panels();
 for (var i = 0; i < allPanels.length; ++i) {
     var p = allPanels[i];
     p.height = ${PANEL_HEIGHT};
     p.hiding = "${PANEL_HIDING}";
+    p.floating = ${PANEL_FLOATING};
 
     var ids = p.widgetIds;
+
+    // ── 1. icons-only task manager swap ──────────────────────────
+    var _taskIdx = -1, _taskId = -1, _hasIconTasks = false;
+    for (var j = 0; j < ids.length; ++j) {
+        var w = p.widgetById(ids[j]);
+        if (w && w.type === "org.kde.plasma.taskmanager") {
+            _taskIdx = w.index; _taskId = ids[j];
+        }
+        if (w && w.type === "org.kde.plasma.icontasks") {
+            _hasIconTasks = true;
+        }
+    }
+    if (!_hasIconTasks && _taskId >= 0) {
+        p.widgetById(_taskId).remove();
+        var _it = p.addWidget("org.kde.plasma.icontasks");
+        if (_it && _taskIdx >= 0) { _it.index = _taskIdx; }
+    }
+
+    // ── 2. always-visible battery widget ─────────────────────────
+    // Re-fetch widgetIds — the task manager swap above may have changed
+    // the live widget list, making the original `ids` snapshot stale.
+    ids = p.widgetIds;
     var hasBattery = false;
     for (var j = 0; j < ids.length; ++j) {
         var w = p.widgetById(ids[j]);
@@ -405,7 +482,7 @@ for (var i = 0; i < allPanels.length; ++i) {
 EOF
         )"
         if "$qdbus_bin" org.kde.plasmashell /PlasmaShell evaluateScript "$script" >/dev/null 2>&1; then
-            echo "[ok] panel: height=${PANEL_HEIGHT}px hiding=${PANEL_HIDING} (+battery)"
+            echo "[ok] panel: height=${PANEL_HEIGHT}px hiding=${PANEL_HIDING} floating=${PANEL_FLOATING} (+battery)"
         else
             echo "[!]  plasmashell evaluateScript failed (panel geometry unchanged)"
         fi

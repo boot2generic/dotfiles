@@ -197,6 +197,7 @@ ok()   { echo "${C_OK}[ok]${C_RST} $*"; }
 warn() { echo "${C_WARN}[!]${C_RST} $*" >&2; }
 err()  { echo "${C_ERR}[!!]${C_RST} $*" >&2; }
 die()  { err "$*"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
 # ============================================================
 # Sanity checks
@@ -400,10 +401,11 @@ BASE_PACKAGES=(
   fonts-material-design-icons-iconfont
   # GTK themes + icons (GTK apps run under either desktop)
   adwaita-icon-theme papirus-icon-theme
-  # Web browser — Debian ships Firefox as `firefox-esr` (not `firefox`).
-  # The i3 Mod+b binding launches firefox-esr directly.  To swap, edit
-  # the binding in ~/.config/i3/config after installing your alternate
-  # (mullvad-browser, chromium, …).
+  # Web browser fallback — firefox-esr is kept as a guaranteed-present
+  # baseline (Debian repo, no external keyring) in case install_librewolf
+  # fails.  Primary browsers (LibreWolf + Mullvad Browser) are installed
+  # by install_librewolf() and install_mullvad() in install_phase().
+  # i3 keybindings: Mod+b → librewolf, Mod+Shift+b → mullvad-browser.
   firefox-esr
   # MPRIS media-key controller — same tool drives the i3 media scripts
   # and Plasma's media-key shortcuts.  Player-agnostic (Spotify, mpv,
@@ -602,6 +604,10 @@ DESKTOP_PLASMA_PACKAGES=(
   # empty device list when there's no battery, and the AC-adapter info
   # it provides is still useful for sleep events.
   upower
+  # Wallpaper fallback — deploy_phase calls generate_wallpaper.py when
+  # the network download fails.  python3-pil (Pillow) is needed on both
+  # desktop paths; on i3 it's already in DESKTOP_I3_PACKAGES.
+  python3-pil
   # Theming — Plasma side + GTK app integration so firefox / thunderbird
   # / GIMP etc. render with the active Plasma color scheme rather than
   # falling back to plain Adwaita.
@@ -977,11 +983,14 @@ install_mullvad() {
   #
   # Failures are best-effort (Mullvad is optional UX) — the wider
   # install_phase swallows the return code.
-  if dpkg -l mullvad-vpn 2>/dev/null | grep -q '^ii'; then
-    ok "mullvad-vpn already installed"
+  local _need=()
+  dpkg -l mullvad-vpn     2>/dev/null | grep -q '^ii' || _need+=(mullvad-vpn)
+  dpkg -l mullvad-browser 2>/dev/null | grep -q '^ii' || _need+=(mullvad-browser)
+  if [[ ${#_need[@]} -eq 0 ]]; then
+    ok "mullvad-vpn + mullvad-browser already installed"
     return 0
   fi
-  log "Installing Mullvad VPN (apt repo) …"
+  log "Installing ${_need[*]} (Mullvad apt repo) …"
   sudo install -d -m 0755 /etc/apt/keyrings
   if ! sudo curl -fsSL https://repository.mullvad.net/deb/mullvad-keyring.asc \
        -o /etc/apt/keyrings/mullvad-keyring.asc; then
@@ -1041,13 +1050,146 @@ install_mullvad() {
   sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
        >"${LOG_DIR}/apt_mullvad_update.log" 2>&1 \
     || { warn "apt update failed after adding Mullvad repo"; return 1; }
-  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mullvad-vpn \
+  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${_need[@]}" \
        >"${LOG_DIR}/apt_mullvad.log" 2>&1; then
-    ok "Mullvad VPN installed"
-    log "Run \`mullvad account login <number>\` to activate"
+    ok "Mullvad packages installed: ${_need[*]}"
+    [[ " ${_need[*]} " == *" mullvad-vpn "* ]] && \
+      log "Run \`mullvad account login <number>\` to activate the VPN"
   else
     tail -10 "${LOG_DIR}/apt_mullvad.log" || true
     warn "Mullvad install failed — see ${LOG_DIR}/apt_mullvad.log"
+    return 1
+  fi
+}
+
+# LibreWolf signing-key fingerprint.  Verify at:
+#   https://librewolf.net/installation/debian/
+# To find the fingerprint of the key you downloaded:
+#   gpg --show-keys --with-colons /etc/apt/keyrings/librewolf.gpg \
+#     | awk -F: '/^pub:/{p=1;next} /^sub:/{p=0} /^fpr:/ && p {print $10; p=0}'
+# Update this constant when LibreWolf rotates their key.
+# Override at runtime:
+#   LIBREWOLF_KEY_FINGERPRINT=<new-fp> ./local_setup.sh install
+LIBREWOLF_KEY_FINGERPRINT="${LIBREWOLF_KEY_FINGERPRINT:-662E3CDD6FE329002E5A38F18EF6A6B8C61F4A09}"
+LIBREWOLF_KEY_URL_DOC="https://librewolf.net/installation/debian/"
+
+install_papirus_folders() {
+  # Install papirus-folders — bash script that recolors Papirus icon
+  # theme folder icons (used by apply-theme.sh to set cyan folders).
+  #
+  # Strategy: try apt first (available in Debian Trixie+); fall back to
+  # a pinned GitHub release tarball on Bookworm.  The fallback installs
+  # only to ~/.local/share/icons so no sudo is needed for that path.
+  if have papirus-folders; then
+    ok "papirus-folders already installed"
+    return 0
+  fi
+  log "Installing papirus-folders …"
+  # Try apt (Trixie / unstable have the package directly)
+  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y papirus-folders \
+       >"${LOG_DIR}/apt_papirus_folders.log" 2>&1; then
+    ok "papirus-folders installed (apt)"
+    return 0
+  fi
+  # Fallback: download the standalone script from GitHub and install it
+  # to /usr/local/bin.  Pinned to a specific release tag to avoid
+  # tracking an ever-moving HEAD.  If Papirus release their script at a
+  # later tag, update the URL + SHA256 below.
+  local url="https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-folders/20230301/papirus-folders"
+  local sha256="VERIFY"   # update with: sha256sum papirus-folders
+  local tmp
+  tmp="$(mktemp)"   # respects $TMPDIR; avoids predictable /tmp symlink race
+  if ! curl -fsSL "$url" -o "$tmp"; then
+    warn "could not fetch papirus-folders from GitHub — skipping"
+    rm -f "$tmp"
+    return 1
+  fi
+  # Integrity check — update sha256 above on version bump.
+  if [[ "$sha256" != "VERIFY" ]]; then
+    if ! echo "${sha256}  ${tmp}" | sha256sum --check --quiet 2>/dev/null; then
+      err "papirus-folders checksum mismatch — refusing to install."
+      err "  expected: $sha256"
+      err "  got: $(sha256sum "$tmp" | cut -d' ' -f1)"
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    warn "papirus-folders SHA256 not pinned in local_setup.sh — skipping integrity check"
+    warn "  update VERIFY in install_papirus_folders() with: sha256sum papirus-folders"
+  fi
+  sudo install -m 755 "$tmp" /usr/local/bin/papirus-folders
+  rm -f "$tmp"
+  if have papirus-folders; then
+    ok "papirus-folders installed (/usr/local/bin)"
+  else
+    warn "papirus-folders install failed"
+    return 1
+  fi
+}
+
+install_librewolf() {
+  # Install LibreWolf (hardened Firefox fork) from the official apt repo.
+  # Idempotent — re-running is a no-op once installed.
+  #
+  # Security model mirrors install_mullvad():
+  # - GPG key downloaded over HTTPS, fingerprint pinned before repo is added.
+  # - signed-by= scoping limits apt trust to this repo only.
+  # - Mismatch aborts with NO state written.
+  if dpkg -l librewolf 2>/dev/null | grep -q '^ii'; then
+    ok "librewolf already installed"
+    return 0
+  fi
+  log "Installing LibreWolf (apt repo) …"
+  sudo install -d -m 0755 /etc/apt/keyrings
+  if ! sudo curl -fsSL https://deb.librewolf.net/keyring.gpg \
+       -o /etc/apt/keyrings/librewolf.gpg; then
+    warn "could not fetch LibreWolf keyring — skipping"
+    return 1
+  fi
+
+  local fps nkeys
+  fps="$(gpg --show-keys --with-colons /etc/apt/keyrings/librewolf.gpg \
+          2>/dev/null \
+        | awk -F: '
+              /^pub:/ {p=1; next}
+              /^sub:/ {p=0}
+              /^fpr:/ && p {print $10; p=0}
+          ')"
+  nkeys="$(printf '%s\n' "$fps" | grep -c .)"
+  if [[ "$nkeys" -ne 1 ]] || [[ "$fps" != "$LIBREWOLF_KEY_FINGERPRINT" ]]; then
+    err "LibreWolf keyring failed pinning check — refusing to install."
+    err "  expected exactly 1 primary key:"
+    err "      $LIBREWOLF_KEY_FINGERPRINT"
+    err "  found $nkeys primary key(s):"
+    while IFS= read -r fp; do err "      ${fp:-<empty>}"; done <<<"$fps"
+    err ""
+    err "What to do next:"
+    err "  1. Compare the expected fingerprint with the value LibreWolf"
+    err "     publishes at:"
+    err "        ${LIBREWOLF_KEY_URL_DOC}"
+    err "  2. If LibreWolf has rotated the key, update LIBREWOLF_KEY_FINGERPRINT"
+    err "     in local_setup.sh (or set the env var) and re-run."
+    err "  3. If LibreWolf has NOT rotated, treat the mismatch as suspicious"
+    err "     and retry from a different network before bypassing."
+    sudo rm -f /etc/apt/keyrings/librewolf.gpg
+    return 1
+  fi
+  ok "LibreWolf keyring verified (1 key, fingerprint $LIBREWOLF_KEY_FINGERPRINT)"
+
+  local arch codename
+  arch="$(dpkg --print-architecture)"
+  codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/librewolf.gpg] https://deb.librewolf.net ${codename} main" \
+    | sudo tee /etc/apt/sources.list.d/librewolf.list > /dev/null
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+       >"${LOG_DIR}/apt_librewolf_update.log" 2>&1 \
+    || { warn "apt update failed after adding LibreWolf repo"; return 1; }
+  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends librewolf \
+       >"${LOG_DIR}/apt_librewolf.log" 2>&1; then
+    ok "LibreWolf installed"
+  else
+    tail -10 "${LOG_DIR}/apt_librewolf.log" || true
+    warn "LibreWolf install failed — see ${LOG_DIR}/apt_librewolf.log"
     return 1
   fi
 }
@@ -1321,9 +1463,16 @@ install_phase() {
     *)      die "Unknown DESKTOP=$DESKTOP (expected i3 or plasma)" ;;
   esac
 
-  # Mullvad VPN — best-effort.  We don't `|| true` inside the function so
-  # the user sees the warning, but install_phase keeps going either way.
+  # Mullvad VPN + Mullvad Browser — best-effort; warnings surface but
+  # install_phase continues either way.
   install_mullvad || true
+  # LibreWolf — hardened Firefox fork, daily-driver browser.
+  install_librewolf || true
+  # papirus-folders — cyan folder recoloring for Papirus-Dark icon theme.
+  # Plasma-only: i3 path doesn't use Papirus folders.
+  if [[ "$DESKTOP" == "plasma" ]]; then
+    install_papirus_folders || true
+  fi
 
   if [[ "$NO_DRIVERS" == 1 ]]; then
     log "Skipping driver install (--no-drivers)"

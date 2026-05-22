@@ -60,7 +60,7 @@
 
     # --- Misc ---
     dmenu   = /usr/bin/rofi -dmenu -p dunst:
-    browser = /usr/bin/firefox
+    browser = /usr/bin/librewolf
     always_run_script = true
     title   = Dunst
     class   = Dunst

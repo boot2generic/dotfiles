@@ -127,10 +127,11 @@ bindsym $mod+Tab exec --no-startup-id rofi -show window
 # File manager
 bindsym $mod+e exec thunar
 
-# Browser — Debian ships Firefox as `firefox-esr` (no `firefox` symlink
-# on a stock install).  Swap to mullvad-browser, chromium, etc. by
-# changing this line and re-running `Mod+Shift+c` to reload i3.
-bindsym $mod+b exec firefox-esr
+# Browsers:
+#   Mod+b       → LibreWolf  (hardened Firefox, daily driver)
+#   Mod+Shift+b → Mullvad Browser  (fingerprint-resistant, privacy sessions)
+bindsym $mod+b       exec librewolf
+bindsym $mod+shift+b exec mullvad-browser
 
 # Screenshots → ~/Pictures with a `screenshot-` prefix so they sort
 # alongside any other shots and grep cleanly.  scrot's tokens:
@@ -303,7 +304,7 @@ bindsym $mod+period workspace next
 bindsym $mod+comma  workspace prev
 
 # --- Window assignments ---
-assign [class="firefox"] $ws2
+assign [class="(?i)firefox|librewolf|mullvad-browser"] $ws2
 assign [class="Thunar"]  $ws3
 
 # --- Floating rules ---
@@ -347,8 +348,8 @@ for_window [class="(?i)thunar"]               title_format "<span foreground='#f
 for_window [class="(?i)nautilus|nemo|pcmanfm|dolphin"]   title_format "<span foreground='#ffcc00'>|</span> %title"
 
 # Browsers — orange (regular) / magenta (privacy) / cyan (chromium-family)
-for_window [class="(?i)firefox-esr|^firefox$|navigator"] title_format "<span foreground='#ff6b35'>|</span> %title"
-for_window [class="(?i)mullvad-browser|tor[ -]browser"]  title_format "<span foreground='#ff00cc'>|</span> %title"
+for_window [class="(?i)firefox-esr|^firefox$|librewolf|navigator"] title_format "<span foreground='#ff6b35'>|</span> %title"
+for_window [class="(?i)mullvad-browser|tor[ -]browser"]             title_format "<span foreground='#ff00cc'>|</span> %title"
 for_window [class="(?i)chromium|google-chrome|brave-browser"] title_format "<span foreground='#00e5ff'>|</span> %title"
 
 # Editors / IDEs — purple

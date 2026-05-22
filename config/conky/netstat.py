@@ -58,6 +58,26 @@ BEACON_CV_THRESHOLD   = 0.15      # stdev/mean below this = "regular"
 BEACON_MIN_MEAN_SECS  = 30        # ignore sub-30s mean intervals — DNS/NTP noise
 BEACON_HISTORY_CAP    = 200       # hard cap on triples in state file (~50KB)
 
+# Processes whose normal connections are folded into a single summary row.
+# Any connection that is anomalous (long-lived or beaconing) still gets an
+# individual row so bad actors are not hidden behind the collapse.
+COLLAPSE_PROCS: set[str] = {
+    # Firefox family
+    "firefox", "librewolf", "waterfox", "floorp",
+    # Mullvad Browser (Firefox-based; "mullvad-browser" is exactly 15 chars,
+    # fitting TASK_COMM_LEN precisely — no truncation occurs)
+    "mullvad-browser",
+    # Chromium family (binary names vary by distro/install method)
+    "chromium", "chromium-browser", "chromium-brows",
+    "chrome", "google-chrome",
+    "brave", "brave-browser",
+    "vivaldi", "vivaldi-stable", "vivaldi-bin",
+    "opera", "opera-browser",
+    "msedge", "microsoft-edge",
+    # Other GTK/Qt browsers
+    "epiphany", "falkon", "qutebrowser", "midori", "luakit",
+}
+
 # SECURITY: store the byte-counter state in a per-user, mode-700
 # directory rather than a predictable /tmp path.  The state file leaks
 # every active connection's destination + transferred bytes — on a
@@ -408,7 +428,19 @@ def _sort_key(c):
     return (bucket, -c["age"])
 conns.sort(key=_sort_key)
 
-for c in conns[:MAX_SHOW]:
+# Split: anomalous connections always get individual rows; normal connections
+# from COLLAPSE_PROCS are folded into a single summary row per process so
+# they don't consume all available display budget.
+individual: list[dict] = []
+collapsed:  dict[str, list[dict]] = {}
+for c in conns:
+    proc_base = c["proc"].split()[0] if c["proc"] else c["proc"]
+    if proc_base in COLLAPSE_PROCS and not (c["is_long"] or c["is_beacon"]):
+        collapsed.setdefault(proc_base, []).append(c)
+    else:
+        individual.append(c)
+
+for c in individual[:MAX_SHOW]:
     old = prev.get(c["key"])
     if old:
         up_rate   = max(0, c["sent"] - old[0]) / dt
@@ -445,3 +477,25 @@ for c in conns[:MAX_SHOW]:
         print(f"{row_color}{line}${{color}}")
     else:
         print(line)
+
+# One summary row per collapsed process.  Shows connection count, public
+# count (security signal), new count, and aggregate bandwidth.
+budget_used = min(len(individual), MAX_SHOW)
+for proc_base, clist in collapsed.items():
+    if budget_used >= MAX_SHOW:
+        break
+    n     = len(clist)
+    n_pub = sum(1 for c in clist if c["is_public"])
+    n_new = sum(1 for c in clist if c["is_new"])
+    up_tot = dn_tot = 0.0
+    for c in clist:
+        old = prev.get(c["key"])
+        if old:
+            up_tot += max(0, c["sent"] - old[0]) / dt
+            dn_tot += max(0, c["recv"] - old[1]) / dt
+    pub_str = (f"  ${{color3}}{n_pub}→pub${{color}}" if n_pub else "  0→pub")
+    new_str = f"  {n_new} new" if n_new else ""
+    line = (f"  [{proc_base} ×{n}{pub_str}{new_str}"
+            f"  ↑{fmt_rate(up_tot)} ↓{fmt_rate(dn_tot)}]")
+    print(line)
+    budget_used += 1

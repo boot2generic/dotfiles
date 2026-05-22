@@ -678,7 +678,10 @@ def check_critical_file_drift() -> str:
     in the diff stays consistent across runs).
     """
     base = Path.home() / ".config" / "conky" / "baseline-critical-files.txt"
-    base.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    # 0700: this file contains the SHA-256 of /etc/shadow — keep it
+    # private even though the hash doesn't reveal password content.
+    base.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(base.parent, 0o700)   # enforce even if dir pre-existed
 
     # Build the candidate file list.  Globs are expanded HERE not in
     # the shell so a malicious filename can't smuggle metachars in.
@@ -723,9 +726,9 @@ def check_critical_file_drift() -> str:
 
     if not base.exists():
         try:
-            base.write_text(
-                "\n".join(f"{sha}  {p}" for p, sha in sorted(current.items())) + "\n"
-            )
+            fd = os.open(base, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write("\n".join(f"{sha}  {p}" for p, sha in sorted(current.items())) + "\n")
         except OSError:
             return line("critfile drift", DIM, "baseline write fail")
         return line("critfile drift", DIM, f"baseline set ({len(current)})")
@@ -800,6 +803,10 @@ def check_recent_sudo_invocations() -> str:
         now = time.time()
         ts = time.mktime(time.strptime(
             f"{time.strftime('%Y')} {ts_str}", "%Y %b %d %H:%M:%S"))
+        # Year-boundary fix: if the log entry appears to be in the future
+        # (Dec entry read in Jan), roll back one year.
+        if ts > now:
+            ts -= 365.25 * 86400
         delta = max(0, int(now - ts))
         if delta < 60:
             rel = f"{delta}s ago"
@@ -927,7 +934,9 @@ def check_parent_anomaly() -> str:
     ppid).  No subprocess.  Per-PID errors swallowed (vanished /
     permission).
     """
-    DAEMONS = {"sshd", "nginx", "apache2", "httpd", "cron", "atd",
+    # cron and atd are intentionally excluded: spawning shells IS their
+    # job, so any cron→sh pair would be a constant false-positive alert.
+    DAEMONS = {"sshd", "nginx", "apache2", "httpd",
                "dovecot", "postfix", "mysqld", "postgres", "exim4"}
     SHELLS  = {"bash", "sh", "zsh", "dash", "ash", "csh", "ksh", "fish",
                "python", "python3", "perl", "ruby", "nc", "ncat",
