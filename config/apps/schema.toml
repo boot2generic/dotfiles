@@ -1,0 +1,162 @@
+# config/apps/schema.toml — authoritative schema reference
+#
+# WHY this file exists:
+#   This is the contract every per-app manifest under config/apps/<name>.toml
+#   MUST honor.  The dispatcher (scripts/install-apps.sh) reads each manifest,
+#   converts it to JSON via Python's tomllib, then hands the JSON to an
+#   install-method adapter (scripts/install-methods/<method>.sh).  Any
+#   deviation here ripples through verify-pins.sh, refresh-pins.sh, audit.sh,
+#   conky's check_pins(), dotfiles-doctor.sh, etc., so changes require a
+#   coordinated cross-file edit.
+#
+#   This file is NEVER loaded as a real manifest — schema*.toml and _*.toml
+#   names are filtered out by the dispatcher's glob.  It exists ONLY as
+#   documentation that lives next to the data it describes (so the docs
+#   can never drift out of the same directory).
+#
+# Field naming conventions:
+#   • snake_case for keys
+#   • TOML strings, not bare identifiers — even for enums (e.g. "apt", not apt)
+#   • dates in ISO-8601 (YYYY-MM-DD)
+#   • SHA-256 in lowercase 64-hex
+#   • GPG fingerprints in UPPERCASE 40-hex, no spaces
+#
+# See schema.example.toml for a heavily-commented worked example.
+
+# ============================================================
+# [meta] — required, identifies the app and its scope
+# ============================================================
+[meta]
+# `name` is the canonical key.  For apt-installed apps, this is the apt
+# package name; for github-release apps, it's the binary's name on $PATH
+# (used as the lookup key in verify-pins.sh / conky's check_pins() / audit).
+name = "<string, required>"
+
+# Human-readable label.  Falls back to `name` when omitted.  Used in
+# dispatcher progress logs and the --list table.
+display_name = "<string, optional>"
+
+# Which machine profiles install this app.  Empty array == install never;
+# omit the key for the same effect.  Recognized profiles (see resolve_profile
+# in scripts/install-apps.sh):
+#   "common"  — every machine
+#   "t14"     — laptops (DMI chassis 8/9/10/14, mirrors is_laptop_chassis)
+#   "desktop" — boxes with an Nvidia GPU (PCI vendor id 10de)
+# The dispatcher installs the app iff machines ∩ resolved_profiles is non-empty.
+machines = ["<one or more strings>"]
+
+# Free-form blurb shown in --list and the dev guide.  No length cap; one
+# sentence is fine.  Optional.
+description = "<string, optional>"
+
+# Upstream docs / homepage.  Optional but strongly recommended — audit.sh
+# can surface broken upstream links during a stale-pin sweep.
+docs_url = "<URL, optional>"
+
+# ============================================================
+# [install] — required, picks the install-method adapter
+# ============================================================
+[install]
+# Exactly one of:
+#   "apt"             — install from already-enabled apt sources
+#   "apt-pinned-repo" — add a third-party repo (gpg-verified) then apt-install
+#   "github-release"  — download a release asset, sha256-verify, drop on disk
+#   "direct-deb"      — download a .deb (sha256-verified) and `dpkg -i`
+# Each value maps 1:1 to scripts/install-methods/<value>.sh.
+method = "<one of: apt | apt-pinned-repo | github-release | direct-deb>"
+
+# Optional override of meta.name when the apt package name differs from
+# the binary name (e.g. `bat` ships as `batcat` on Debian).  For non-apt
+# methods this key is ignored.
+package = "<string, optional>"
+
+# ============================================================
+# [install.apt_pinned_repo] — REQUIRED when method = "apt-pinned-repo"
+#                             FORBIDDEN otherwise (the dispatcher does
+#                             not enforce this, but reviewers should)
+# ============================================================
+[install.apt_pinned_repo]
+package         = "<string, required>"      # apt package name to install
+suite_url       = "<URL>"                   # https://download.example.com/apt
+suite           = "<string>"                # release name; may contain the
+                                            # literal token $(distro_codename)
+                                            # which the adapter substitutes with
+                                            # `lsb_release -cs` at install time
+components      = ["<string>", "..."]       # e.g. ["main"] or ["stable", "non-free"]
+key_url         = "<URL>"                   # armored or binary GPG key URL
+key_fingerprint = "<40 uppercase hex, no spaces>"
+                                            # MUST match the key fetched from
+                                            # key_url; refresh-keys.sh enforces.
+keyring_file    = "<basename>.gpg"          # dropped under
+                                            # config/system/etc/apt/keyrings/
+sources_file    = "<basename>.sources"      # dropped under
+                                            # config/system/etc/apt/sources.list.d/
+
+# ============================================================
+# [install.github_release] — REQUIRED when method = "github-release"
+# ============================================================
+[install.github_release]
+repo            = "<org/repo>"              # e.g. "sharkdp/bat"
+asset_pattern   = "<glob>"                  # MUST include {arch}; e.g.
+                                            # "bat-v{version}-{arch}-unknown-linux-gnu.tar.gz"
+version         = "<tag>"                   # e.g. "v0.24.0"
+install_to      = "<absolute path>"         # /usr/local/bin/<name> for binaries,
+                                            # /opt/<name>/ for trees
+sha256_x86_64   = "<64 hex>"                # mandatory on amd64
+sha256_aarch64  = "<64 hex or empty>"       # mandatory on arm64 if you support it;
+                                            # leave "" to declare "x86_64-only"
+gpg_fingerprint = "<40 hex or empty>"       # set when upstream signs releases
+                                            # (e.g. starship); empty disables the
+                                            # signature check in verify-pins.sh
+extract_path    = "<rel path or empty>"     # for tar/zip archives: relative
+                                            # path inside the archive to the
+                                            # binary/tree we actually want.
+                                            # Empty for raw single-file assets.
+
+# ============================================================
+# [install.direct_deb] — REQUIRED when method = "direct-deb"
+# ============================================================
+[install.direct_deb]
+url     = "<URL>"                           # direct https:// link to the .deb
+sha256  = "<64 hex>"                        # mandatory; no signature-fallback
+version = "<string>"                        # human label; lets us spot drift
+                                            # without re-parsing the URL
+
+# ============================================================
+# [pin] — required for any method except plain "apt"
+#         (apt is implicitly pinned by the OS suite)
+# ============================================================
+[pin]
+last_refreshed     = "<YYYY-MM-DD>"         # set by refresh-pins.sh
+refresh_after_days = 90                     # audit.sh / conky check_pins() flags
+                                            # pins past their refresh date.
+
+# ============================================================
+# [configs] — optional, deploys post-install dotfiles
+# ============================================================
+# Map of <absolute dest path> → table with:
+#   source  : path relative to config/apps/<name>/   (rooted in this repo)
+#   mode    : octal string, e.g. "0644"
+#   overlay : when true, ~/.config/dotfiles-local/<name>/<basename> takes
+#             precedence over the in-repo source.  Lets a machine keep
+#             local-only tweaks without diverging the repo.
+[configs]
+# "/home/USER/.config/example-app/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
+
+# ============================================================
+# [[hooks.pre_install]] / [[hooks.post_install]] — optional
+# ============================================================
+# Arrays of tables; commands run in array order, sequentially, as the
+# install user (NOT root — use sudo inside if you need it).  Placeholders:
+#   {app_dir}  — config/apps/<name>/ absolute path
+#   {name}     — meta.name
+# Non-zero exit from a hook aborts the install (exit code 2 per the
+# dispatcher contract).
+#
+# [[hooks.pre_install]]
+# description = "blow away a stale config the package would otherwise refuse to overwrite"
+# command     = "rm -f /etc/{name}/legacy.conf"
+#
+# [[hooks.post_install]]
+# description = "enable the systemd unit we just dropped"
+# command     = "sudo systemctl enable --now {name}.service"

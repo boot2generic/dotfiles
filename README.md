@@ -90,6 +90,43 @@ What each path supports, at a glance.  Rows are capabilities; cells are `✓` (s
 
 **Where the full-GUI paths diverge:** Path A is the canonical implementation; Path B is the older SSH-pexpect mirror and is intentionally NOT at full feature parity (see the `✗` cells above).  If you want the modern full-GUI behavior on a remote VM, the recommended workflow is: `git push` your dotfiles repo, `git clone` it on the VM, run `./local_setup.sh setup --bypass` there directly.  Path B is kept for the niche case of fully unattended end-to-end setup of a virgin VM via pexpect.
 
+### Application installs (Phase 0)
+
+A second install layer lives beside the per-host overrides: a
+manifest-driven application installer at
+[`config/apps/`](config/apps/README.md). One TOML file per third-party
+app, four install methods (`apt`, `apt-pinned-repo`, `github-release`,
+`direct-deb`), schema-validated, with pinned GPG fingerprints + SHA-256
+hashes that get verified before anything lands on disk. The dispatcher
+([`scripts/install-apps.sh`](scripts/install-apps.sh)) filters by the
+machine profile set (`common` always; `t14` on DMI chassis 8/9/10/14;
+`desktop` on detected NVIDIA) and shells out to one of four adapters
+under `scripts/install-methods/`.
+
+Phase 0 ships infrastructure only — the dispatcher, four adapters, three
+pin-workflow scripts, and three migrated existing pins (starship,
+JetBrains Mono Nerd Font, Mullvad VPN). No new apps are installed yet;
+the existing inline install paths in `local_setup.sh` keep working.
+
+```bash
+./scripts/install-apps.sh --list                 # what would run on this machine
+./scripts/install-apps.sh --app starship --dry-run
+./scripts/verify-pins.sh                         # 0 fresh / 1 stale / 2 bad / 3 typo
+./scripts/refresh-pins.sh --all                  # weekly cron; mutates TOML, never commits
+./scripts/refresh-keys.sh --app mullvad-vpn      # interactive, single-app key rotation
+```
+
+A stale or failing pin shows up in three places: the conky HEALTH
+overlay's `supply chain` row (see "Beyond install — monitoring +
+drift" below), `scripts/dotfiles-doctor.sh`'s new SUPPLY CHAIN section,
+and `scripts/audit.sh`'s `pins` row. See
+[`config/apps/README.md`](config/apps/README.md) for the field-by-field
+schema, the add-an-app workflow, and how the dispatcher hands off to
+each adapter. The supply-chain trust pillars (apt repo signing, SHA-256
+pinning, optional GPG `VALIDSIG`) are documented in
+[`readme/security.md`](readme/security.md) → "Application install
+supply chain".
+
 ### Beyond install — monitoring + drift
 
 After install, two surfaces keep watch over the machine:
@@ -654,6 +691,10 @@ own page yet. The most-used ones, with one-line summaries:
 | `scripts/dotfiles-doctor.sh`          | One-page workstation health report (DRIFT + SYSTEM + NETWORK + DEPLOY sections); the standalone counterpart to the conky HEALTH panel. Shells out to `audit.sh` for the drift block. Flags: `--brief`, `--no-color`. Nagios-style exit codes (0 OK / 1 WARN / 2 BAD). |
 | `scripts/take-over-wifi.sh`           | Hands wifi from ifupdown / iwd / wpa_supplicant / systemd-networkd to NetworkManager — pre-imports SSID/PSK from `/etc/network/interfaces` into NM before stopping the old backend so reconnect is automatic. Run by `local_setup.sh setup` automatically when applicable; can also be invoked by hand. `--revert` undoes the takeover (restores the most recent `/etc/network/interfaces.bak.<TS>`, removes the NM conf.d snippet, re-enables the prior backend). |
 | `scripts/diagnose-wifi.sh`            | Read-only diagnostic dump for "wifi isn't working". Redacts wpa-psk / wpa-passphrase / wpa-password / wpa-preshared-key / wpa-wep-key* / wpa-eappsk / wpa-identity / wpa-anonymous-identity / wpa-private-key* / wpa-pin and replaces wpa-passphrase-file / wpa-psk-file paths with `<REDACTED-PATH>`. Safe to paste into a bug report. |
+| `scripts/install-apps.sh`             | Manifest-driven application installer. Discovers `config/apps/*.toml`, resolves the machine profile (`common`/`t14`/`desktop`), and dispatches each app to its method adapter under `scripts/install-methods/`. Flags: `--all` (default), `--app NAME`, `--list`, `--dry-run`, `--profile NAME`, `--help`. Adapter contract: exit 0 success/intentional-skip, 1 pre-flight failure, 2 installation error. See [`config/apps/README.md`](config/apps/README.md). |
+| `scripts/verify-pins.sh`              | Read-only verification of every `config/apps/<name>.toml` pin block — sha256 / GPG fingerprint / freshness against `last_refreshed + refresh_after_days`. Called by `install-apps.sh` (pre-flight), `audit.sh`, `dotfiles-doctor.sh`, and conky's `check_pins()`. Exit codes are the contract: 0 ok, 1 stale, 2 verification fail, 3 `--app NAME` matched no manifest. Flags: `--all`, `--app NAME`, `--json`, `--strict-fresh` (stale → exit 2 for cron). |
+| `scripts/refresh-pins.sh`             | Periodic pin refresher — pulls upstream metadata, rewrites `last_refreshed` (and version + sha256 for `github-release` on a tag bump) in-place into the TOML. **Never** auto-commits — a clean `git diff` is the review surface. Per-method behaviour: `apt` skipped, `apt-pinned-repo` runs a scoped `apt-get update` (bumps date if signed Release verifies; logs CRITICAL on key rotation), `github-release` recomputes SHAs on tag drift, `direct-deb` does a HEAD liveness check only. Flags: `--all`, `--app NAME`, `--method NAME`, `--dry-run`, `--quiet`. |
+| `scripts/refresh-keys.sh`             | Interactive, manual-only, single-app keyring rotation for `apt-pinned-repo` apps. Downloads `key_url`, compares fingerprints, on accept atomically swaps `config/system/etc/apt/keyrings/<keyring_file>` and updates `key_fingerprint` in the TOML. Append-only audit log at `~/.cache/dotfiles/key-rotations.log`. No `--all` by design — each rotation is its own security event. Flags: `--app NAME` (required), `--yes`. |
 
 ### System hooks deployed under `config/system/`
 
@@ -680,6 +721,7 @@ it's a silent no-op when the host can't use it:
 ├── vm_automation.py           ← remote VM setup over SSH
 ├── local_setup.sh             ← local-machine setup (Debian 12+)
 ├── config/                    ← all dotfiles, deployed to ~/.config/<name>
+│   ├── apps/                  ← per-app TOML manifests (Phase 0 dispatcher input)
 │   ├── i3/                    ← i3wm
 │   ├── tmux/                  ← tmux.conf
 │   ├── nvim/                  ← init.lua + lazy.nvim plugins
@@ -696,7 +738,8 @@ it's a silent no-op when the host can't use it:
 │   ├── lightdm/               ← display-manager greeter theme (TEMPLATE: *.conf.in with @HOME@)
 │   ├── plasma/                ← Plasma 6 / Wayland configs + apply-theme.sh + kscreen-baseline.py
 │   ├── sddm/                  ← SDDM greeter theming
-│   ├── system/                ← root-owned drop-ins (suspend hook, dock udev, NVIDIA env, resolved DoT, NM)
+│   ├── system/                ← root-owned drop-ins (suspend hook, dock udev, NVIDIA env, resolved DoT, NM,
+│   │                            apt keyrings under etc/apt/keyrings/, apt sources under etc/apt/sources.list.d/)
 │   ├── gtk-2.0/, gtk-3.0/     ← GTK theme overrides
 │   └── xorg.conf.d/           ← Hyper-V Xorg config
 └── scripts/
@@ -705,8 +748,13 @@ it's a silent no-op when the host can't use it:
     ├── provision-server.sh    ← shell-only setup of a remote server over SSH
     ├── install-shell.sh       ← shell-only setup of THIS machine (online or --offline)
     ├── build-bundle.sh        ← builds bundle/ for `install-shell.sh --offline`
-    ├── audit.sh               ← drift-diff vs ~/.config/conky/baseline-*.txt (cron-friendly)
-    ├── dotfiles-doctor.sh     ← one-page health report (DRIFT / SYSTEM / NETWORK / DEPLOY)
+    ├── install-apps.sh        ← Phase 0 application-install dispatcher (reads config/apps/*.toml)
+    ├── install-methods/       ← per-method adapters (apt, apt-pinned-repo, github-release, direct-deb)
+    ├── verify-pins.sh         ← read-only pin verification (exit 0/1/2/3 = ok/stale/bad/typo)
+    ├── refresh-pins.sh        ← periodic pin refresher (rewrites TOML in place, never commits)
+    ├── refresh-keys.sh        ← manual, interactive, single-app keyring rotation
+    ├── audit.sh               ← drift-diff vs ~/.config/conky/baseline-*.txt (cron-friendly; pins pseudo-baseline)
+    ├── dotfiles-doctor.sh     ← one-page health report (DRIFT / SUPPLY CHAIN / SYSTEM / NETWORK / DEPLOY)
     ├── take-over-wifi.sh      ← hands wifi from ifupdown/iwd/wpa_supplicant to NM (--revert undoes)
     └── diagnose-wifi.sh       ← read-only wifi diagnostic dump (PSK-redacted)
 ```

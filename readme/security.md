@@ -533,6 +533,128 @@ together.
 
 ---
 
+## Application install supply chain
+
+Phase 0 adds a formal supply-chain layer for third-party apps installed
+outside the OS suite. Every app the dotfiles install lives as a TOML
+manifest under [`config/apps/`](../config/apps/README.md); the
+dispatcher ([`scripts/install-apps.sh`](../scripts/install-apps.sh))
+filters by machine profile and shells out to one of four method
+adapters under `scripts/install-methods/`. The Mullvad keyring
+fingerprint pinning + starship/JetBrains-Mono sha256 + GPG checks
+documented above ("What's hardened out-of-the-box") are now the
+**migrated baseline**, not bespoke per-script logic: they're three
+manifests (`mullvad-vpn.toml`, `starship.toml`, `jetbrains-mono-nerd.toml`)
+verified by the same `scripts/verify-pins.sh` everything else uses.
+
+### The three trust pillars
+
+Different install methods carry different trust models. The dispatcher
+matches each app to one of three:
+
+1. **apt repo signing** — for `apt-pinned-repo` apps (currently Mullvad
+   VPN). The keyring file under
+   `config/system/etc/apt/keyrings/<name>-keyring.asc` is verified at
+   install time against the 40-hex `key_fingerprint` pinned in the
+   manifest; the matching DEB822 sources file under
+   `config/system/etc/apt/sources.list.d/<name>.sources` carries
+   `Signed-By:` pointing at that keyring. Apt's own Release-file
+   signature verification covers everything downstream. The keyring
+   fingerprint is the trust anchor; rotation is single-app, interactive,
+   and routes through `scripts/refresh-keys.sh` with an append-only
+   audit log at `~/.cache/dotfiles/key-rotations.log`.
+
+2. **SHA-256 pinning** — for `github-release` and `direct-deb` apps
+   (currently starship, JetBrains Mono Nerd Font). The manifest carries
+   a 64-hex `sha256` (or `sha256_x86_64` / `sha256_aarch64` for
+   multi-arch GitHub releases) that the adapter verifies after download
+   and before install. A compromised CDN cannot ship a backdoored
+   tarball without also bumping the hash — and the manifest is in git,
+   so the hash bump is a reviewable diff. `sha256_aarch64 = ""` is the
+   convention for "x86_64-only" (do not omit the key; `verify-pins.sh`
+   checks for its presence).
+
+3. **Optional GPG signature verification** — for `github-release` apps
+   when the upstream maintainer signs release artifacts. Set in the
+   manifest as a 40-hex `gpg_fingerprint`; the adapter imports the key
+   into an ephemeral homedir, verifies the detached signature, and
+   requires a `VALIDSIG` line from gpg (i.e. signed AND by the pinned
+   key, not just "signed by anyone in the local ring"). An empty
+   `gpg_fingerprint = ""` disables this layer for upstreams that don't
+   sign — sha256 alone is then the only guard.
+
+### Pin verification (`scripts/verify-pins.sh`)
+
+A single read-only tool checks every pin: keyring fingerprint matches
+the manifest, sha256 matches the on-disk artifact (when present), and
+`last_refreshed + refresh_after_days` hasn't passed. The exit code is
+the contract — cron and conky branch on it without parsing stdout:
+
+| Exit | Meaning |
+|---|---|
+| `0` | every pin fresh AND verified (or no manifests on disk) |
+| `1` | at least one pin is STALE (date drift only) |
+| `2` | at least one pin failed VERIFICATION (sha / GPG / keyring mismatch — a security event) |
+| `3` | `--app NAME` was given but no manifest matched (typo / missing file — distinct from 2) |
+
+"Bad" dominates "stale" on purpose: a fingerprint mismatch should alert
+even when half the manifests also happen to be stale. `--strict-fresh`
+promotes stale → exit 2 for crons that want stale dates treated as
+hard failures. The same exit codes feed `scripts/audit.sh`'s `pins`
+pseudo-baseline row, `scripts/dotfiles-doctor.sh`'s new SUPPLY CHAIN
+section (between DRIFT and SYSTEM), and the conky HEALTH overlay's
+`supply chain` row (`check_pins()` in
+[`~/.config/conky/health.py`](../config/conky/health.py): green = all
+fresh, yellow = N stale, red = N failed, dim when the script is missing
+/ timed out — see "Conky security monitoring" below).
+
+### Periodic refresh, no auto-commit
+
+`scripts/refresh-pins.sh` is cron-driven and rewrites the TOMLs in
+place — `last_refreshed` always, plus version + sha256 on a
+`github-release` tag bump. It **never** commits. A real upstream
+version bump should land as a reviewed `git diff` (release notes,
+breaking-changes scan); the script intentionally stops at the TOML edit
+so the human reviewing the diff is the one taking the trust step. Key
+rotations are even stricter — they require `scripts/refresh-keys.sh
+--app NAME`, interactive by default (`--yes` exists but is for
+out-of-band-verified rotations only), single-app at a time. There is
+no `--all` for key rotation by design: batching rotations would let a
+typo or an MITM on one slip through under cover of the other.
+
+### Bundle integrity vs per-pin verification
+
+The two layers are independent:
+
+- `INSTALL_SKIP_BUNDLE_CHECK=1` still works for the offline-bundle path
+  (`scripts/install-shell.sh --offline`). That escape hatch covers
+  `bundle/manifest.sha256` and the optional `manifest.sha256.asc`
+  signature — see "Bundle tamper-evidence" in the top-level README.
+- There is deliberately **no** equivalent per-pin "skip" env var. The
+  per-app sha256 / GPG / keyring checks are non-bypassable; if upstream
+  rotates a key or sha, the manifest must be updated by hand (the
+  dispatcher refuses on `verify-pins.sh` exit 2). The keyring rotation
+  is gated through `scripts/refresh-keys.sh`'s interactive prompt; the
+  sha bumps land via `scripts/refresh-pins.sh` followed by a manual
+  `git commit`.
+
+### Manifest layout
+
+| File | Role |
+|---|---|
+| `config/apps/<name>.toml` | Per-app manifest. Filename = `meta.name`. |
+| `config/apps/schema.toml` | Authoritative field-by-field schema. |
+| `config/apps/schema.example.toml` | Worked example exercising every install method. |
+| `config/apps/README.md` | Dev guide — add/remove an app, install-method semantics, machine profiles, file map. |
+| `config/system/etc/apt/keyrings/<name>-keyring.asc` | Tracked source-of-truth keyring (apt-pinned-repo only). |
+| `config/system/etc/apt/sources.list.d/<name>.sources` | DEB822 sources with `${distro_codename}` placeholder + `Signed-By:` pointer. |
+| `scripts/install-methods/<method>.sh` | One adapter per install method (`apt`, `apt-pinned-repo`, `github-release`, `direct-deb`). |
+
+See [`config/apps/README.md`](../config/apps/README.md) for the full
+dev guide and the table of "files to modify when…".
+
+---
+
 ## Verifying a hardened install
 
 After `./local_setup.sh harden`, sanity-check each layer:

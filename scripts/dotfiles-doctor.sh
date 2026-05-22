@@ -18,11 +18,12 @@
 #
 # Output sections (in order):
 #   1. DRIFT          — audit.sh summary
-#   2. SYSTEM         — disk, memory, OOM kills, kernel taint, NTP,
+#   2. SUPPLY CHAIN   — verify-pins.sh per-app freshness + sha/gpg pins
+#   3. SYSTEM         — disk, memory, OOM kills, kernel taint, NTP,
 #                       pending firmware updates, pending reboot
-#   3. NETWORK        — listening ports / established conns, default
+#   4. NETWORK        — listening ports / established conns, default
 #                       route, DNS, Mullvad
-#   4. DEPLOY         — is ~/.config/{plasma,i3}/ in sync with the repo?
+#   5. DEPLOY         — is ~/.config/{plasma,i3}/ in sync with the repo?
 #
 # Behaviour:
 #   default     full report, every row printed
@@ -46,6 +47,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 AUDIT_SH="${SCRIPT_DIR}/audit.sh"
+VERIFY_PINS_SH="${SCRIPT_DIR}/verify-pins.sh"
 
 # ── Argument parsing ───────────────────────────────────────────────
 BRIEF=0
@@ -151,7 +153,62 @@ do_drift() {
     done <<<"$out"
 }
 
-# ── 2. SYSTEM ──────────────────────────────────────────────────────
+# ── 2. SUPPLY CHAIN ────────────────────────────────────────────────
+# Per-app pin freshness + sha/gpg verification.  We shell out to
+# verify-pins.sh (Agent C, scripts/verify-pins.sh) in non-JSON mode and
+# parse its [ok]/[stale]/[bad] markers back into row() — same trick as
+# do_drift() but the underlying severity vocabulary uses "stale"
+# instead of "warn".  Map stale → warn for consistency with the rest
+# of the doctor report.
+#
+# When verify-pins.sh hasn't landed yet (parallel agent rollout) the
+# section emits a single dim row instead of misclassifying the absence
+# as a tool failure.
+do_supply_chain() {
+    section "SUPPLY CHAIN (pins)"
+    if [[ ! -x "$VERIFY_PINS_SH" ]]; then
+        row dim "verify-pins.sh" "not installed at $VERIFY_PINS_SH"
+        return
+    fi
+    local out rc
+    # Same exit-code capture pattern as do_drift's audit.sh invocation:
+    # verify-pins.sh exits non-zero on stale/bad pins (expected, not a
+    # tool failure).  Stash rc separately so we can distinguish.
+    out="$(NO_COLOR=1 "$VERIFY_PINS_SH" 2>&1)" && rc=0 || rc=$?
+    # Conventionally: rc=0 ok, rc=1 stale, rc=2 bad, rc>=3 tool fault.
+    if (( rc >= 3 )); then
+        row bad "verify-pins.sh" "exited $rc (tool failure)"
+        return
+    fi
+    local any_row=0
+    while IFS= read -r line; do
+        line="$(printf '%s' "$line" | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g')"
+        [[ -z "$line" ]] && continue
+        # verify-pins.sh format is column-aligned (Agent C):
+        #   "[<status>]    <app>          <age>d <method>"
+        # We don't use `:` as a field separator — split on whitespace
+        # and take the first three tokens.
+        if [[ "$line" =~ ^\[(ok|stale|bad)\][[:space:]]+([A-Za-z0-9_.+-]+)[[:space:]]+(.*)$ ]]; then
+            local st="${BASH_REMATCH[1]}"
+            local nm="${BASH_REMATCH[2]}"
+            local sm="${BASH_REMATCH[3]}"
+            # Trim trailing whitespace introduced by column padding.
+            sm="${sm%"${sm##*[![:space:]]}"}"
+            # stale → warn in doctor's vocabulary; ok/bad pass through.
+            [[ "$st" == "stale" ]] && st="warn"
+            row "$st" "$nm" "$sm"
+            any_row=1
+        fi
+    done <<<"$out"
+    if (( ! any_row )); then
+        # verify-pins.sh ran but produced no parseable rows — surface
+        # the raw first line so the operator can debug.
+        local first; first="$(head -1 <<<"$out")"
+        row dim "verify-pins.sh" "no parseable output${first:+ (saw: ${first:0:40})}"
+    fi
+}
+
+# ── 3. SYSTEM ──────────────────────────────────────────────────────
 # Mirrors a subset of health.py's non-drift checks, plus a couple of
 # extras that don't fit on the conky panel (high-CPU spike already in
 # health.py, so we omit it here — it's an instantaneous snapshot
@@ -315,7 +372,7 @@ do_system() {
     do_firmware
 }
 
-# ── 3. NETWORK ─────────────────────────────────────────────────────
+# ── 4. NETWORK ─────────────────────────────────────────────────────
 # Standalone-CLI extras not in the conky panel.  None of these are
 # severity-coded — they're informational rows you scan visually.  But
 # we still emit them via row() so colours / brief mode behave.
@@ -398,7 +455,7 @@ do_network() {
     fi
 }
 
-# ── 4. DEPLOY ──────────────────────────────────────────────────────
+# ── 5. DEPLOY ──────────────────────────────────────────────────────
 # Compare specific config dirs under ~/.config against the corresponding
 # repo dirs under $REPO_DIR/config.  This catches "I edited the live
 # config and forgot to copy it back to the repo" (or vice versa).
@@ -450,6 +507,7 @@ when="$(date -Iseconds 2>/dev/null || date)"
 printf '%sdotfiles-doctor%s @ %s  on  %s\n' "$C_BOLD" "$C_RST" "$when" "$host"
 
 do_drift
+do_supply_chain
 do_system
 do_network
 do_deploy

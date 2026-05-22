@@ -24,6 +24,10 @@
 #   modules        "<name> <use_count>" per line         lsmod
 #   critical-files "<sha256>  <path>" per line           sha256sum on /etc/passwd, sudoers.d, etc.
 #   suid           "<sha256>  <path>" per line           find / -perm -4000/-2000, then sha256sum
+#   pins           NOT a baseline file — a live shell-out to
+#                  scripts/verify-pins.sh --json that surfaces app
+#                  pin freshness + sha/gpg verification status as a
+#                  pseudo-baseline row.  See gen_pins() below.
 #
 # Exit code:
 #   0  — every baseline is OK or WARN
@@ -66,7 +70,7 @@ BASELINE_DIR="${HOME}/.config/conky"
 #      same format the baseline file uses.
 #   3. (Optional) Implement diff_<name>() if the format needs special
 #      handling — otherwise the generic line-set diff is used.
-BASELINES=(ports modules critical-files suid)
+BASELINES=(ports modules critical-files suid pins)
 
 # ── Argument parsing (mirrors build-bundle.sh's pattern) ───────────
 OUTPUT_JSON=0
@@ -179,6 +183,70 @@ gen_critical-files() {
     # Re-emit through sort -k2.
     # Note: we sort the WHOLE output after collecting it, by piping
     # this function's stdout through sort -k2 at the call site below.
+}
+
+gen_pins() {
+    # `pins` is a PSEUDO-baseline: there's no on-disk baseline-pins.txt
+    # to diff against — instead we shell out to scripts/verify-pins.sh
+    # --json (Phase 0 supply-chain check) and produce a deterministic
+    # text representation here so the existing diff_/audit_one driver
+    # is happy.  Emits one line per app:
+    #     <status>:<name>:<detail>
+    # where <status> ∈ {ok, stale, bad} and the colons partition the
+    # row for parse_pins_summary() below.  Returns empty on missing
+    # script (Agent C hasn't landed yet) — audit_one() then short-
+    # circuits to a DIM row rather than a spurious BAD.
+    local vp="${SCRIPT_DIR}/verify-pins.sh"
+    if [[ ! -x "$vp" ]]; then
+        # Sentinel line — caller (audit_one_pins) recognises it.
+        echo "missing:verify-pins.sh:script not found"
+        return 0
+    fi
+    # --json is preferred so we can parse without ANSI/format drift.
+    # Tolerate non-zero exit codes (1 = stale, 2 = bad verification)
+    # by capturing rc separately and feeding only stdout downstream.
+    local out
+    if ! out="$("$vp" --json 2>/dev/null)"; then
+        : # rc captured by caller via run; output may still be valid JSON
+    fi
+    if [[ -z "$out" ]]; then
+        echo "missing:verify-pins.sh:no output"
+        return 0
+    fi
+    # Parse JSON via python3 — already in the dotfiles dep set (conky
+    # health.py, local_setup.sh's font extract, audit_one's caller).
+    # We deliberately tolerate malformed JSON (e.g. Agent C ships a
+    # newer schema we don't recognise yet) by falling back to a
+    # single-line "parse-error" sentinel.  The here-string feeds JSON
+    # to python's stdin; the inline script is the python source.
+    python3 -c '
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+except Exception as e:
+    print(f"missing:verify-pins.sh:json parse error ({type(e).__name__})")
+    sys.exit(0)
+# Agent C ships verify-pins.sh --json emitting a top-level JSON array
+# of per-app records.  Accept either that or a {"apps": [...]} wrapper
+# so we are resilient if the format gets nested later.
+if isinstance(d, list):
+    apps = d
+else:
+    apps = d.get("apps") or d.get("results") or []
+for a in apps:
+    name   = a.get("name", "?")
+    status = a.get("status", "ok")
+    detail = a.get("detail") or a.get("reason") or ""
+    age    = a.get("days_old")
+    if age is None:
+        age = a.get("age_days")
+    if age is not None and not detail:
+        detail = f"age={age}d"
+    name   = str(name).replace(":", "_")
+    status = str(status).replace(":", "_")
+    detail = str(detail).replace(":", " ").replace("\n", " ")
+    print(f"{status}:{name}:{detail}")
+' <<<"$out"
 }
 
 gen_suid() {
@@ -349,6 +417,61 @@ run_diff() {
     esac
 }
 
+# ── pins: pseudo-baseline driver ───────────────────────────────────
+# `pins` doesn't have an on-disk baseline (the legit state is whatever
+# verify-pins.sh says right now), so we skip audit_one's read/diff path
+# entirely and compute DIFF_STATUS / DIFF_SUMMARY from gen_pins()'s
+# tagged output.  Status mapping mirrors verify-pins.sh exit codes:
+#   any "bad:…"     row → DIFF_STATUS=bad
+#   else any "stale:…" → DIFF_STATUS=warn
+#   else missing sentinel → DIFF_STATUS=dim
+#   else                → DIFF_STATUS=ok
+audit_pins() {
+    local out n_total n_ok n_stale n_bad oldest_app oldest_age first_bad
+    out="$(gen_pins 2>/dev/null || true)"
+    if [[ -z "$out" ]]; then
+        DIFF_STATUS="dim"
+        DIFF_SUMMARY="gen_pins produced no output"
+        return
+    fi
+    # Sentinel — verify-pins.sh isn't on disk yet (Agent C pending).
+    if [[ "$out" =~ ^missing: ]]; then
+        DIFF_STATUS="dim"
+        DIFF_SUMMARY="$(head -1 <<<"$out" | awk -F: '{print $2": "$3}')"
+        return
+    fi
+    n_total=$(grep -c '.' <<<"$out" || true)
+    n_ok=$(   grep -c '^ok:'    <<<"$out" || true)
+    n_stale=$(grep -c '^stale:' <<<"$out" || true)
+    n_bad=$(  grep -c '^bad:'   <<<"$out" || true)
+    [[ -z "$n_total" ]] && n_total=0
+    [[ -z "$n_ok"    ]] && n_ok=0
+    [[ -z "$n_stale" ]] && n_stale=0
+    [[ -z "$n_bad"   ]] && n_bad=0
+    if (( n_bad > 0 )); then
+        # Sample the first BAD row so the operator sees what failed.
+        first_bad="$(grep '^bad:' <<<"$out" | head -1 \
+                     | awk -F: '{print $2": "$3}')"
+        DIFF_STATUS="bad"
+        DIFF_SUMMARY="${n_bad} verification failure(s) (e.g. ${first_bad})"
+        return
+    fi
+    if (( n_stale > 0 )); then
+        # Try to surface the oldest stale entry — verify-pins.sh's JSON
+        # carries age_days inline.  We just take the first stale row;
+        # adapters that want ordering can sort their JSON output.
+        oldest_app="$(grep '^stale:' <<<"$out" | head -1 \
+                      | awk -F: '{print $2}')"
+        oldest_age="$(grep '^stale:' <<<"$out" | head -1 \
+                      | awk -F: '{print $3}')"
+        DIFF_STATUS="warn"
+        DIFF_SUMMARY="${n_stale} stale (oldest: ${oldest_app} ${oldest_age})"
+        return
+    fi
+    DIFF_STATUS="ok"
+    DIFF_SUMMARY="${n_total} apps, all fresh + verified"
+}
+
 # ── Per-baseline driver ────────────────────────────────────────────
 # Returns via DIFF_STATUS / DIFF_SUMMARY globals.  Side effect: writes
 # the baseline file on first run (matching health.py's behaviour) so
@@ -400,6 +523,12 @@ audit_one() {
 # the named baseline and exits 0 cleanly so cron-like callers can drive
 # it from a wrapper script.
 if [[ -n "$REFRESH" ]]; then
+    # `pins` has no on-disk baseline — refreshing it is meaningless.
+    # The correct knob is scripts/refresh-pins.sh (Agent C).  Bail with
+    # a hint rather than write an empty/garbage baseline file.
+    if [[ "$REFRESH" == "pins" ]]; then
+        die "'pins' has no on-disk baseline; bump pin freshness via scripts/refresh-pins.sh"
+    fi
     base_file="${BASELINE_DIR}/baseline-${REFRESH}.txt"
     current="$(gen_current "$REFRESH" 2>/dev/null || true)"
     if [[ -z "$current" ]]; then
@@ -425,7 +554,14 @@ severity_rank() {
 }
 
 for name in "${BASELINES[@]}"; do
-    audit_one "$name"
+    # `pins` is a live shell-out, not a baseline file — route it through
+    # its dedicated driver.  All other baselines use the standard
+    # generator/diff path.
+    if [[ "$name" == "pins" ]]; then
+        audit_pins
+    else
+        audit_one "$name"
+    fi
     RESULT_STATUS[$name]="$DIFF_STATUS"
     RESULT_SUMMARY[$name]="$DIFF_SUMMARY"
     if (( $(severity_rank "$DIFF_STATUS") > $(severity_rank "$WORST") )); then

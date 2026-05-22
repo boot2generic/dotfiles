@@ -1,0 +1,76 @@
+# config/apps/jetbrains-mono-nerd.toml
+#
+# Phase 0 migration intent
+# ------------------------
+# JetBrainsMono Nerd Font is currently installed by:
+#   local_setup.sh:install_nerd_font  (~L2394-2457)
+#
+# That function:
+#   • downloads JetBrainsMono.zip from the ryanoasis/nerd-fonts v3.3.0
+#     release (line 2415: `rel="…/nerd-fonts/releases/download/v3.3.0"`),
+#   • downloads the release's SHA-256.txt manifest,
+#   • extracts the JetBrainsMono.zip line, verifies via `sha256sum -c`,
+#   • python-extracts the `*NerdFont*.ttf` files to
+#     ~/.local/share/fonts/NerdFonts/, then `fc-cache -f`.
+#
+# This TOML is a DESCRIPTOR ONLY in Phase 0 — local_setup.sh keeps
+# running unchanged.  A future-phase github-release adapter will
+# consume this manifest in place of the inline curl + sha-256 dance.
+#
+# Schema choices
+# --------------
+# • asset_pattern: legacy code downloads `JetBrainsMono.zip` (NOT the
+#   `.tar.xz` listed in the schema preamble — both are published by
+#   upstream; we mirror the existing code's choice so Phase 0 is a
+#   no-behaviour-change descriptor).  No `{arch}` substitution — the
+#   font archive is architecture-independent (TTF files).
+# • install_to: /usr/local/share/fonts/JetBrainsMono — system-wide font
+#   directory used by fontconfig.  NOTE: the existing local_setup.sh
+#   path drops files under ~/.local/share/fonts/NerdFonts/ (user-scope)
+#   rather than system-wide; either location is valid for fontconfig.
+#   The Phase 0 schema convention favours absolute system paths, and a
+#   future-phase adapter can override to ~/.local for parity with the
+#   legacy path if desired.
+# • extract_path: empty — the github-release adapter is expected to
+#   recognise font archives and unpack the whole tree.
+# • Nerd Fonts releases are NOT GPG-signed; sidecar SHA-256 is the only
+#   tamper signal.
+#
+# Pin values
+# ----------
+# Version v3.3.0 sha pulled from upstream SHA-256.txt manifest on
+# 2026-05-19 — matches what local_setup.sh:install_nerd_font would
+# verify on a fresh run today.  Fonts rarely need bumping, so a 90-day
+# refresh window is generous; verify-pins.sh will flag staleness only
+# if upstream cuts a new release between bumps.
+
+[meta]
+name         = "jetbrains-mono-nerd"
+display_name = "JetBrainsMono Nerd Font"
+machines     = ["common"]
+description  = "Nerd-Font-patched JetBrainsMono — supplies PUA glyphs used by i3 / polybar / alacritty / rofi for icon rendering."
+docs_url     = "https://github.com/ryanoasis/nerd-fonts"
+
+[install]
+method = "github-release"
+
+[install.github_release]
+repo            = "ryanoasis/nerd-fonts"
+# Font archive is arch-independent; no {arch} placeholder.  Legacy code
+# downloads the .zip variant — keep that to match the existing pin
+# manifest line we'd verify against (`grep '^.* JetBrainsMono.zip$' SHA-256.txt`).
+asset_pattern   = "JetBrainsMono.zip"
+version         = "v3.3.0"
+install_to      = "/usr/local/share/fonts/JetBrainsMono"
+sha256_x86_64   = "2d83782a350b604bfa70fce880604a41a7f77c3eec8f922f9cdc3c20952ddbe4"
+# Same archive on every architecture — populate both so verify-pins
+# doesn't flag arm64 as missing.
+sha256_aarch64  = "2d83782a350b604bfa70fce880604a41a7f77c3eec8f922f9cdc3c20952ddbe4"
+gpg_fingerprint = ""
+# Empty — adapter unpacks the whole .zip; there is no single binary to
+# extract from a nested path.
+extract_path    = ""
+
+[pin]
+last_refreshed     = "2026-05-19"
+refresh_after_days = 90

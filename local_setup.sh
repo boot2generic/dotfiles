@@ -2267,9 +2267,11 @@ deploy_phase() {
 
   # Desktop-specific config patches.
   case "$DESKTOP" in
-    i3)     patch_picom_backend ;;
-    plasma) patch_conky_window_type ;;
+    i3) patch_picom_backend ;;
   esac
+  # Always patch conky window type — the function handles both desktops.
+  # Must run after deploy so rsync doesn't overwrite the patched config.
+  patch_conky_window_type
 
   # Wallpaper: prefer the curated Unsplash hacker image
   # (download_wallpaper.sh, SHA-256 pinned).  If the download fails —
@@ -3623,7 +3625,7 @@ This stage will:
                 konsole/,autostart/,apply-theme.sh} +
                 /etc/sddm.conf.d/10-wayland.conf +
                 lightdm disable + sddm enable +
-                conky own_window_type → 'desktop' patch
+                conky own_window_type → 'normal' patch
   • Generate the desktop wallpaper (Unsplash → procedural fallback)
   • Configure xrdp if it's installed (otherwise skipped)
   • Time: < 30 seconds

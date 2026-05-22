@@ -902,13 +902,20 @@ looked?". Both are cron-friendly (clean exit codes, `--brief` /
 `--json` modes).
 
 - **`scripts/audit.sh`** — diffs current state against the baselines
-  under `~/.config/conky/baseline-*.txt`. Four baselines today:
+  under `~/.config/conky/baseline-*.txt`. Four baselines today, plus
+  one pseudo-baseline:
   `ports` (listening sockets via `ss -tln`), `modules` (loaded kernel
   modules via `lsmod`), `critical-files` (sha256 of
   `/etc/{passwd,shadow,sudoers,…}`), `suid` (sha256-keyed SUID/SGID
-  inventory across the rootfs). Drift semantics intentionally mirror
+  inventory across the rootfs), and `pins` (a pseudo-baseline driven
+  by `scripts/verify-pins.sh --json`'s live output — not an on-disk
+  file, so there's nothing to `--refresh-baseline`; the legit state
+  is whatever the manifests under `config/apps/` currently pin to).
+  Drift semantics intentionally mirror
   `~/.config/conky/health.py`'s `check_*_drift` checks — same diff,
-  no second source of truth.
+  no second source of truth. The `pins` row reports
+  `[ok|stale|bad] pins: N apps...` and joins ports / modules /
+  critical-files / suid as a tracked baseline-style check.
 
   ```bash
   ./scripts/audit.sh                            # human-readable summary
@@ -920,12 +927,17 @@ looked?". Both are cron-friendly (clean exit codes, `--brief` /
   (`MAILTO=` in crontab catches this); exit 2 = usage error.
 
 - **`scripts/dotfiles-doctor.sh`** — one-page report covering DRIFT
-  (shells out to `audit.sh`), SYSTEM (disk, memory, OOM, kernel taint,
-  NTP, pending firmware, pending reboot), NETWORK (listening ports,
-  default route, DNS, Mullvad), and DEPLOY (is `~/.config/{plasma,i3}/`
-  in sync with the repo?). Standalone counterpart to the conky HEALTH
-  panel — what you want over SSH or when pasting a snapshot into a bug
-  report.
+  (shells out to `audit.sh`), SUPPLY CHAIN (per-app pin freshness +
+  sha/gpg verification via `scripts/verify-pins.sh`, sits between DRIFT
+  and SYSTEM), SYSTEM (disk, memory, OOM, kernel taint, NTP, pending
+  firmware, pending reboot), NETWORK (listening ports, default route,
+  DNS, Mullvad), and DEPLOY (is `~/.config/{plasma,i3}/` in sync with
+  the repo?). Standalone counterpart to the conky HEALTH panel — what
+  you want over SSH or when pasting a snapshot into a bug report.
+  The SUPPLY CHAIN section maps verify-pins's `[ok|stale|bad]` markers
+  back into doctor's `ok | warn | bad` vocabulary (stale → warn) and
+  is by design quiet on healthy state — `--brief` filters the `[ok]`
+  rows out, so a clean machine produces an empty section header.
 
   ```bash
   ./scripts/dotfiles-doctor.sh                # full report, every row

@@ -1,0 +1,24 @@
+# Phase 0 — declarative apt source for Mullvad VPN.
+#
+# WHY this file lives in the repo:
+#   The existing install path (local_setup.sh:install_mullvad, ~L967)
+#   writes a one-line legacy `mullvad.list` to /etc/apt/sources.list.d/
+#   at install time.  This tracked deb822 .sources is the DESCRIPTOR
+#   referenced by config/apps/mullvad.toml's install.apt_pinned_repo
+#   subtable; the Phase 0 adapter consumes it but Phase 0 is additive,
+#   so the legacy .list path keeps running untouched.
+#
+#   The codename is left as ${distro_codename}; the adapter substitutes
+#   `lsb_release -cs` at install time so one source line works across
+#   trixie / bookworm / future Debian releases.
+#
+# Signing-key fingerprint pinned in config/apps/mullvad.toml.  Source
+# of truth (rotation cadence multi-year):
+#   https://mullvad.net/en/help/install-mullvad-app-linux
+
+Types: deb
+URIs: https://repository.mullvad.net/deb/stable
+Suites: ${distro_codename}
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/mullvad-keyring.asc

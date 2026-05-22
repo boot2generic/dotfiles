@@ -1056,6 +1056,84 @@ def check_module_drift() -> str:
     return line("module drift", sev, " ".join(bits))
 
 
+# ── 21. Supply-chain pin freshness ──────────────────────────
+def check_pins() -> str:
+    """Phase 0 supply-chain row.
+
+    Shells out to scripts/verify-pins.sh and classifies by exit code:
+      0 → OK   ("all fresh")
+      1 → WARN ("<N> stale")        — at least one pin past refresh_after_days
+      2 → BAD  ("<N> failed")       — sha-256 / gpg verification fail
+      missing script  → DIM ("verify-pins.sh missing")
+      tool error (rc≥3 / no exec) → DIM ("err: <token>")
+
+    Sits in the drift cluster because it answers the same kind of
+    question those checks do ("did something change without me
+    noticing?") — just one rung further up the supply chain.
+
+    Resolution of the script path uses a small search list so the
+    panel works whether health.py is invoked from ~/.config/conky/
+    (the deployed location) OR straight out of the dotfiles repo.
+    """
+    # Candidate paths, in order.  We resolve relative to:
+    #   1. an explicit ~/Share/dotfiles checkout (this user's layout)
+    #   2. a sibling-of-this-script layout (deployed conky dir + repo)
+    #   3. PATH (last-ditch — verify-pins.sh isn't usually on PATH but
+    #      a future install step might add it).
+    home = Path.home()
+    candidates = [
+        home / "Share" / "dotfiles" / "scripts" / "verify-pins.sh",
+        Path(__file__).resolve().parent.parent.parent / "scripts" / "verify-pins.sh",
+    ]
+    script: Path | None = None
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            script = c
+            break
+    if script is None:
+        return line("supply chain", DIM, "verify-pins.sh missing")
+
+    # Run the script and capture rc + stdout.  Short timeout — pin
+    # verification is a local sha-256 + age check, not a network
+    # operation, so anything >5s is pathological.
+    try:
+        proc = subprocess.run(
+            [str(script)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=5, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return line("supply chain", DIM, "verify-pins timeout")
+    except Exception:
+        return line("supply chain", DIM, "verify-pins err")
+
+    rc = proc.returncode
+    out = proc.stdout or ""
+
+    # Parse counts from the human-readable output.  We DON'T re-run with
+    # --json — running it twice would double-cost a check the panel
+    # repaints frequently.  Counts pulled by regex; tolerant of format
+    # drift (Agent C may evolve column widths / wording).
+    n_stale = len(re.findall(r"^\[stale\]", out, flags=re.MULTILINE))
+    n_bad   = len(re.findall(r"^\[bad\]",   out, flags=re.MULTILINE))
+    n_ok    = len(re.findall(r"^\[ok\]",    out, flags=re.MULTILINE))
+
+    if rc == 0:
+        # rc==0 should always mean "all fresh".  Surface the count when
+        # we can parse it for context; fall back to a generic label.
+        if n_ok > 0:
+            return line("supply chain", OK, f"{n_ok} fresh")
+        return line("supply chain", OK, "all fresh")
+    if rc == 1:
+        n = n_stale or "?"
+        return line("supply chain", WARN, f"{n} stale")
+    if rc == 2:
+        n = n_bad or "?"
+        return line("supply chain", BAD, f"{n} failed")
+    # rc >= 3 (or anything unrecognised) → tool fault, don't pretend.
+    return line("supply chain", DIM, f"verify-pins rc={rc}")
+
+
 # ── Driver ──────────────────────────────────────────────────
 # `disk SMART` and `storage pools` (ZFS/mdadm/btrfs) checks were
 # removed — neither was actionable for this user's setup and both
@@ -1072,11 +1150,15 @@ CHECKS = [
     check_failed_sudo,
     check_recent_sudo_invocations,
     # Drift checks clustered: same persistence-baseline pattern,
-    # same "delete baseline to ack" UX.
+    # same "delete baseline to ack" UX.  `check_pins` is supply-chain
+    # rather than runtime drift but shares the same "did something
+    # change since last sweep" mental model, so it lives in the
+    # cluster.
     check_port_drift,
     check_module_drift,
     check_critical_file_drift,
     check_suid_drift,
+    check_pins,
     # Anomaly checks clustered: process-tree / exe-path heuristics.
     check_suspicious_paths,
     check_parent_anomaly,

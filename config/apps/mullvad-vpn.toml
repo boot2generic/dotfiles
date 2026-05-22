@@ -1,0 +1,68 @@
+# config/apps/mullvad-vpn.toml
+#
+# Phase 0 migration intent
+# ------------------------
+# Mullvad VPN is currently installed by:
+#   local_setup.sh:install_mullvad  (~L967-1053)
+#   • Pulls the keyring from https://repository.mullvad.net/deb/mullvad-keyring.asc
+#   • Verifies it contains EXACTLY ONE primary key matching
+#     MULLVAD_KEY_FINGERPRINT = A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF
+#     (defined at local_setup.sh:964; env-overridable for rotations).
+#   • Writes a one-line legacy `/etc/apt/sources.list.d/mullvad.list`:
+#       deb [signed-by=/etc/apt/keyrings/mullvad-keyring.asc arch=$arch] \
+#           https://repository.mullvad.net/deb/stable ${codename} main
+#   • `apt-get update` (scoped) → `apt-get install mullvad-vpn`.
+#
+# This TOML is a DESCRIPTOR ONLY in Phase 0.  local_setup.sh keeps
+# running unchanged — the legacy `.list` and the inline keyring fetch
+# remain the active install code.  A future-phase apt-pinned-repo
+# adapter (Agent B) will consume this manifest and deploy the
+# deb822-format .sources file shipped under
+# config/system/etc/apt/sources.list.d/ alongside the tracked keyring
+# blob.
+#
+# Tracked-file companions to this manifest:
+#   • config/system/etc/apt/keyrings/mullvad-keyring.asc
+#       Verbatim copy of the keyring local_setup.sh fetches at install
+#       time — checked in so verify-pins.sh can fingerprint it without
+#       a network round-trip, and so the offline-bundle install path
+#       has a tamper-evident copy to compare against.
+#   • config/system/etc/apt/sources.list.d/mullvad.sources
+#       deb822-format equivalent of the legacy mullvad.list (uses the
+#       `${distro_codename}` placeholder that the adapter substitutes).
+#
+# Source of truth for key rotations:
+#     https://mullvad.net/en/help/install-mullvad-app-linux
+
+[meta]
+name         = "mullvad-vpn"
+display_name = "Mullvad VPN"
+machines     = ["common"]
+description  = "WireGuard/OpenVPN client + daemon from Mullvad's official apt repo (kept current via the standard apt upgrade flow once the source list is registered)."
+docs_url     = "https://mullvad.net/en/help/install-mullvad-app-linux"
+
+[install]
+method = "apt-pinned-repo"
+
+[install.apt_pinned_repo]
+package         = "mullvad-vpn"
+suite_url       = "https://repository.mullvad.net/deb/stable"
+# The legacy install path substitutes `lsb_release -cs` for the codename
+# at install time (local_setup.sh:1038-1040).  Mirror that so one
+# manifest serves trixie / bookworm / future Debian releases.
+suite           = "$(distro_codename)"
+components      = ["main"]
+key_url         = "https://repository.mullvad.net/deb/mullvad-keyring.asc"
+# Pinned fingerprint — must match what local_setup.sh:964 enforces.
+# If you bump this, bump MULLVAD_KEY_FINGERPRINT in local_setup.sh in
+# the same commit (the two paths are independent in Phase 0 but a
+# divergence would silently let one path accept a key the other rejects).
+key_fingerprint = "A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF"
+# Filenames the apt-pinned-repo adapter will deploy from the tracked
+# copies under config/system/etc/apt/...
+keyring_file    = "mullvad-keyring.asc"
+sources_file    = "mullvad.sources"
+
+[pin]
+last_refreshed     = "2026-05-19"
+refresh_after_days = 90

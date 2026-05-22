@@ -1,0 +1,139 @@
+# config/apps/schema.example.toml — copy-and-trim worked example
+#
+# This file exercises EVERY install method and EVERY optional field at once,
+# which is intentionally nonsensical — a real app would pick ONE [install.*]
+# subtable.  The comments call out which sections are mutually exclusive.
+#
+# How to use:
+#   1. cp config/apps/schema.example.toml config/apps/<your-app>.toml
+#   2. Pick exactly ONE install method.
+#   3. Delete the [install.*] subtables that don't match your method.
+#   4. Delete optional sections you don't need ([configs], hook arrays).
+#   5. Run `scripts/install-apps.sh --app <your-app> --dry-run` to validate.
+#
+# The dispatcher skips files named schema*.toml, so renaming this file in
+# place would do nothing useful — always copy first.
+
+# ============================================================
+# [meta] — identity + scope
+# ============================================================
+[meta]
+name         = "example-app"                # canonical key; not a real package
+display_name = "Example App"                # shown in --list and progress logs
+machines     = ["common", "t14", "desktop"] # install everywhere
+description  = "Imaginary app proving the schema covers every field."
+docs_url     = "https://example.invalid/docs"
+
+# ============================================================
+# [install] — pick exactly ONE method
+# ============================================================
+[install]
+# Comment / uncomment to switch which method this example demonstrates.
+# Only ONE of the [install.apt_pinned_repo], [install.github_release],
+# [install.direct_deb] subtables below may be present in a real manifest.
+method  = "github-release"
+package = "example-app"                     # optional override of meta.name
+
+# ============================================================
+# Method-specific subtable: apt
+# ============================================================
+# No subtable is needed when method = "apt".  The dispatcher just runs
+# `apt-get install -y <package or meta.name>`.  Example:
+#
+#   [meta]
+#   name = "ripgrep"
+#   machines = ["common"]
+#   [install]
+#   method = "apt"
+#
+# That's the whole manifest.  (No [pin] block — apt is OS-pinned.)
+
+# ============================================================
+# Method-specific subtable: apt-pinned-repo
+# (when method = "apt-pinned-repo", this subtable is REQUIRED
+#  and the github_release / direct_deb subtables must be absent)
+# ============================================================
+[install.apt_pinned_repo]
+package         = "example-app"
+suite_url       = "https://download.example.invalid/apt"
+suite           = "$(distro_codename)"      # adapter substitutes `lsb_release -cs`
+                                            # — lets one manifest serve multiple
+                                            # Debian releases without an edit.
+components      = ["main"]
+key_url         = "https://download.example.invalid/keys/example-app-archive-keyring.asc"
+key_fingerprint = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+keyring_file    = "example-app-archive-keyring.gpg"
+sources_file    = "example-app.sources"
+
+# ============================================================
+# Method-specific subtable: github-release
+# (when method = "github-release", this subtable is REQUIRED;
+#  the apt_pinned_repo / direct_deb subtables must be absent)
+# ============================================================
+[install.github_release]
+repo            = "example-org/example-app"
+asset_pattern   = "example-app-v{version}-{arch}-unknown-linux-gnu.tar.gz"
+                                            # {arch} → "x86_64" or "aarch64";
+                                            # {version} → the `version` below
+                                            # (literal — no auto-stripping of "v").
+version         = "v1.2.3"
+install_to      = "/usr/local/bin/example-app"
+sha256_x86_64   = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+sha256_aarch64  = ""                        # empty = "this app ships x86_64 only"
+gpg_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567"
+                                            # empty = "upstream doesn't sign"
+extract_path    = "example-app-v1.2.3-x86_64-unknown-linux-gnu/example-app"
+                                            # path inside the tarball to the
+                                            # binary; relative, no leading slash.
+
+# ============================================================
+# Method-specific subtable: direct-deb
+# (when method = "direct-deb", this subtable is REQUIRED;
+#  the apt_pinned_repo / github_release subtables must be absent)
+# ============================================================
+[install.direct_deb]
+url     = "https://download.example.invalid/example-app_1.2.3_amd64.deb"
+sha256  = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+version = "1.2.3"
+
+# ============================================================
+# [pin] — required for every method except plain "apt"
+# ============================================================
+[pin]
+last_refreshed     = "2026-05-19"           # set by `scripts/refresh-pins.sh`
+refresh_after_days = 90                     # audit.sh + conky check_pins() flag
+                                            # anything past this threshold.
+
+# ============================================================
+# [configs] — optional file-deploy map
+# ============================================================
+# Sources are resolved relative to config/apps/example-app/ — drop the
+# actual files into that subdirectory.  The dispatcher does NOT create
+# the parent directories of dest paths; the install-method adapter or a
+# pre_install hook should.
+[configs]
+"/home/USER/.config/example-app/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
+"/etc/example-app/policy.json"               = { source = "policy.json", mode = "0644", overlay = false }
+
+# ============================================================
+# Hook arrays — optional, run in array order
+# ============================================================
+# Run as the install user (not root).  Use sudo inside the command if a
+# step needs elevation.  Placeholders:
+#   {app_dir}  → absolute path to config/apps/example-app/
+#   {name}     → "example-app"
+[[hooks.pre_install]]
+description = "remove a stale legacy config the new package would refuse to overwrite"
+command     = "sudo rm -f /etc/{name}/legacy.conf"
+
+[[hooks.pre_install]]
+description = "ensure dest config dir exists before [configs] deploys into it"
+command     = "install -d -m 0755 /home/$USER/.config/{name}"
+
+[[hooks.post_install]]
+description = "enable the unit file shipped by the package"
+command     = "sudo systemctl enable --now {name}.service"
+
+[[hooks.post_install]]
+description = "echo where we deployed from — handy in --dry-run logs"
+command     = "echo deployed {name} using {app_dir}"
