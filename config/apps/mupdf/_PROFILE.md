@@ -72,6 +72,19 @@ mupdf has no per-user config file by default; clearing
 rm -rf ~/.cache/mupdf
 ```
 
+## Override (per-machine)
+
+mupdf does not have a config file deployed by this repo (the hardening
+is invocation-driven via the `-J 0` flag). To diverge per-machine,
+either:
+
+- Edit your `~/.config/i3/config` binding (or your `xdg-mime` desktop
+  entry under `~/.local/share/applications/`) to launch `mupdf`
+  without `-J 0` when you trust the PDF source.
+- Drop a tweaked `.desktop` under
+  `~/.config/dotfiles-local/mupdf/` and reference it from your shell
+  config; nothing in apps.toml ships an overlay for mupdf today.
+
 ## See also
 
 - Upstream: <https://mupdf.com/>

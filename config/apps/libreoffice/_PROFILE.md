@@ -3,13 +3,13 @@
 LibreOffice's privacy-relevant settings live in XML registry files
 under `/etc/libreoffice/registry/data/` and in the per-user
 `~/.config/libreoffice/4/user/registrymodifications.xcu`. Templating
-the XML is doable but Phase C deliberately defers it — the registry
-is sprawling and any error blocks LibreOffice from launching.
+the XML is doable but intentionally deferred — the registry is
+sprawling and any error blocks LibreOffice from launching.
 
 This `_PROFILE.md` documents the manual hardening steps to apply via
 the LibreOffice GUI immediately after first launch. The same settings
-can be applied with a configuration-management tool later when we
-template the XML.
+can be applied with a configuration-management tool later if a
+templated `registrymodifications.xcu` ever lands.
 
 ## After first launch, do this
 
@@ -96,5 +96,17 @@ Re-launch LibreOffice and re-apply the steps above.
 
 - Upstream security docs:
   <https://wiki.documentfoundation.org/Documentation/Administration/Security>
-- Phase D / E plans: ship a templated
-  `registrymodifications.xcu.in` and a small sed-based merger.
+- Possible future work: ship a templated
+  `registrymodifications.xcu.in` and a small sed-based merger so the
+  GUI walkthrough above isn't required on every fresh install.
+
+## Override (per-machine)
+
+LibreOffice's hardening lives in the user's registry, not in a file
+this repo deploys. Per-machine overrides happen by editing the
+`Tools → Options …` panes after first launch — there is nothing
+under `~/.config/dotfiles-local/libreoffice/` to layer on top of.
+
+If you want to skip the GUI walkthrough on a machine you already
+configured before, copy the existing `~/.config/libreoffice/`
+directory across.

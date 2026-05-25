@@ -4,11 +4,11 @@
 # Top-level dispatcher for the apps lifecycle (validate, install, freeze,
 # unfreeze, refresh, verify, remove, list, status).
 #
-# Phase B: every subcommand is wired to real behaviour.  Mutating
-# subcommands (install / freeze / unfreeze / remove) re-run the
-# pre-flight validator gate before touching anything; read-only
-# subcommands (list / status / verify / refresh) skip that gate because
-# the underlying scripts they wrap already run it.
+# Every subcommand is wired to real behaviour.  Mutating subcommands
+# (install / freeze / unfreeze / remove) re-run the pre-flight validator
+# gate before touching anything; read-only subcommands (list / status /
+# verify / refresh) skip that gate because the underlying scripts they
+# wrap already run it.
 #
 # Usage:
 #     scripts/apps-cli.sh validate [--app NAME]
@@ -741,11 +741,11 @@ pin["mode"] = "frozen"
 # land in apps.toml.  lockfile_read uses tomllib which only checks that
 # the file IS valid TOML — it does not enforce sha256 format or version
 # character set.  If a malicious local process pre-positioned a crafted
-# lockfile under config/apps/.locks/ (the directory is owner-only by
-# Phase B fix #6, but defense in depth costs us nothing), freeze would
-# otherwise copy whatever string it found into the manifest.  The next
-# `apps validate` run would catch the bad shape, but the git diff would
-# already look plausible to a quick-glance reviewer.
+# lockfile under config/apps/.locks/ (the directory is owner-only via
+# the lockfile-dir hardening, but defense in depth costs us nothing),
+# freeze would otherwise copy whatever string it found into the
+# manifest.  The next `apps validate` run would catch the bad shape,
+# but the git diff would already look plausible to a quick-glance reviewer.
 import re
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9._+-]{1,128}$")
@@ -785,7 +785,7 @@ elif method in ("apt", "apt-pinned-repo"):
     # owned by `apps refresh` (which actually re-checks the upstream
     # signature/key).  If we bumped it here, a user running freeze six
     # months after install would silence the staleness alarm without
-    # ever re-validating the key — see Phase B review finding #10.
+    # ever re-validating the key.
     sys.stderr.write("[apps-cli] note: apt methods track upstream versions; 'frozen' is informational\n")
     sys.stderr.write("[apps-cli] note: pin.last_refreshed unchanged — use `apps refresh` to bump it\n")
 else:

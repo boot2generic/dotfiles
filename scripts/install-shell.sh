@@ -116,14 +116,18 @@ Rebuild bundle on a machine matching the target architecture."
         warn "INSTALL_SKIP_BUNDLE_CHECK=1 set — skipping manifest.sha256 verification"
     elif [[ -f "$BUNDLE_DIR/manifest.sha256" ]]; then
         log "Verifying bundle integrity (sha256sum -c manifest.sha256) …"
+        # mktemp -t for the integrity-check log so a local attacker can't
+        # pre-create the predictable /tmp path as a symlink to a root-
+        # owned file and race the fs.protected_regular check.
+        _bundle_check_log="$(mktemp -t install-shell-bundle-check.XXXXXX.log)"
         if ( cd "$BUNDLE_DIR" \
-             && sha256sum --check --strict --quiet manifest.sha256 ) 2>/tmp/install-shell-bundle-check.log; then
+             && sha256sum --check --strict --quiet manifest.sha256 ) 2>"$_bundle_check_log"; then
             ok "bundle integrity verified ($n_debs debs, $(wc -l < "$BUNDLE_DIR/manifest.sha256") files total)"
         else
             err "bundle integrity check FAILED.  This is a security alarm,"
             err "not a transient error — files have changed since the bundle"
             err "was built.  Investigate before continuing:"
-            err "  sudo cat /tmp/install-shell-bundle-check.log"
+            err "  sudo cat $_bundle_check_log"
             err ""
             err "If you're INTENTIONALLY running with a hand-modified bundle"
             err "(e.g. swapped starship tarball), re-run with"
@@ -160,7 +164,8 @@ or set INSTALL_SKIP_BUNDLE_CHECK=1 if you trust the bundle source."
         # to the user.  --status-fd 1 would be more rigorous (machine-
         # readable) but parsing the human text suffices for the one
         # warning we care about here.
-        _gpg_log=/tmp/install-shell-gpg-verify.log
+        # mktemp -t per finding #5 of the project-wide security review.
+        _gpg_log="$(mktemp -t install-shell-gpg-verify.XXXXXX.log)"
         if gpg --verify "$BUNDLE_DIR/manifest.sha256.asc" \
                         "$BUNDLE_DIR/manifest.sha256" \
                         >"$_gpg_log" 2>&1; then
@@ -237,7 +242,9 @@ if (( OFFLINE )); then
         # actual failure (the `dpkg -i` output, run interactively).
         warn "apt-get install ./*.deb failed under --offline."
         warn "Falling back to dpkg -i (which doesn't need apt cache) …"
-        if sudo dpkg -i "$BUNDLE_DIR"/debs/*.deb >/tmp/install-shell-dpkg.log 2>&1; then
+        # mktemp -t per finding #5 of the project-wide security review.
+        _dpkg_log="$(mktemp -t install-shell-dpkg.XXXXXX.log)"
+        if sudo dpkg -i "$BUNDLE_DIR"/debs/*.deb >"$_dpkg_log" 2>&1; then
             ok "dpkg -i succeeded — packages installed from bundle"
         else
             err "dpkg -i could not install all bundled packages — likely missing"
@@ -246,7 +253,7 @@ if (( OFFLINE )); then
             err "(would need internet to fetch missing deps)."
             err ""
             err "Diagnose:"
-            err "  • sudo tail -50 /tmp/install-shell-dpkg.log"
+            err "  • sudo tail -50 $_dpkg_log"
             err "  • sudo dpkg --audit            # half-configured packages"
             err "  • dpkg -l | grep -E '^iU|^iF'  # broken/wedged installs"
             err ""

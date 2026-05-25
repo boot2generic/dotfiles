@@ -893,6 +893,29 @@ DOTFILES_NO_LOCAL=1 ./local_setup.sh deploy
 Repo defaults remain the source of truth — the overlay is local-only,
 never committed.
 
+The apps subsystem (`config/apps/apps.toml`) has its own overlay seam
+at `~/.config/dotfiles-local/apps.toml` — see
+[`readme/apps.md`](apps.md) → "Per-machine overrides".
+
+---
+
+## Apps subsystem prerequisites in `BASE_PACKAGES`
+
+The base apt set installed by `install_phase` carries two tools the
+apps subsystem hard-requires:
+
+| Package | Used by | Why it's in `BASE_PACKAGES` |
+|---|---|---|
+| `jq` | every `scripts/install-methods/*.sh` adapter | Parses the manifest JSON the dispatcher hands each adapter. Lands in stage 1 (install) so stage 3 (apps) can rely on it. Earlier versions had a bootstrap-order problem — the fresh-box first run had no jq yet and each adapter exited with a confusing "jq-missing" skipped_reason. |
+| `python3-tomlkit` | `scripts/apps-cli.sh freeze` / `unfreeze`, `scripts/refresh-pins.sh` | Format-preserving TOML writes. The manifest carries hand-curated section headers + per-entry comments; naive sed/awk rewrites would strip them. tomlkit is the standard library for round-tripping TOML without comment loss. |
+
+If you re-run `local_setup.sh setup` after deleting one by hand, the
+install phase reinstalls it without any further intervention. The
+`apps-cli.sh install` codepath additionally re-checks jq and will `sudo
+apt-get install -y jq` on demand when invoked outside the setup flow.
+
+See [`readme/apps.md`](apps.md) for the full subsystem reference.
+
 ---
 
 ## Drift monitoring (audit.sh + dotfiles-doctor.sh)

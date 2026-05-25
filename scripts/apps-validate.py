@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """apps-validate.py — schema-v2 validator for config/apps/*.toml.
 
-Phase A pre-flight for the application-installer refactor.  Walks every
-TOML file under ``config/apps/`` that contains a top-level ``[[apps]]``
-array (schema_version 2), validates each entry against the cross-field
-rules documented in ``/tmp/phase-a-design.md``, and reports ALL
-violations in a single pass — no fail-fast.
+Hard pre-flight for every mutating subcommand of ``apps-cli.sh`` (and
+for ``install-apps.sh`` directly).  Walks every TOML file under
+``config/apps/`` that contains a top-level ``[[apps]]`` array
+(schema_version 2), validates each entry against the cross-field rules
+documented in ``config/apps/schema.toml``, and reports ALL violations
+in a single pass — no fail-fast.
 
 Standalone by design: stdlib only, no third-party deps.  Read-only with
 respect to the repository (this script never writes; ``apps-cli.sh``
@@ -584,10 +585,11 @@ def _check_pin(
 
 # Explicit allowlist for `[apps.configs].<dest>` paths.  Any dest that
 # doesn't match one of these prefixes is rejected by the validator.
-# Phase D's deploy step would otherwise become an arbitrary-file-write
+# Without this gate the deploy step would become an arbitrary-file-write
 # primitive if a manifest were tampered with — the validator is the
-# gate.  Prefixes are checked AFTER path normalization (".."/control-char
-# rejection happens first), so traversal can't slip through.
+# chokepoint.  Prefixes are checked AFTER path normalization
+# (".."/control-char rejection happens first), so traversal can't slip
+# through.
 #
 # Adding a new system-dir prefix requires a code change here AND a
 # review pass — opaque entries like /etc/sudoers, /etc/pam.d/sudo,
@@ -744,8 +746,8 @@ def _check_configs(
                     ))
 
         mode = spec.get("mode")
-        # Reject setuid/setgid/sticky-bit modes: the Phase B deploy adapter
-        # runs as root for system configs, and an attacker who could edit
+        # Reject setuid/setgid/sticky-bit modes: the deploy adapter runs
+        # as root for system configs, and an attacker who could edit
         # apps.toml (e.g. via a compromised local process) would otherwise
         # land setuid-root copies of attacker-controlled files on disk.
         # Plain 3-octal modes (0NNN) only — no 4-octal forms.

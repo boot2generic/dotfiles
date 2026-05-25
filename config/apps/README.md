@@ -7,11 +7,11 @@ resolves the active machine profile, validates every entry, and delegates
 the actual install to method-specific adapters under
 `scripts/install-methods/`.
 
-Phase A introduces **schema version 2**: one consolidated
-`apps.toml` (TOML array-of-tables) instead of one file per app. The
-validator is a **hard gate** — a broken `apps.toml` blocks every install
-subcommand. Old per-file manifests linger on disk until end-to-end tests
-pass; they are not consumed by the dispatcher.
+The repo runs on **schema version 2**: one consolidated `apps.toml`
+(TOML array-of-tables) instead of one file per app. The validator is
+a **hard gate** — a broken `apps.toml` blocks every install subcommand.
+The legacy per-file manifests have been removed; `apps.toml` is the
+single source of truth.
 
 ## Contents at a glance
 
@@ -32,9 +32,9 @@ The dispatcher and validator skip filenames matching:
 - `.*.toml` (dotfiles)
 
 Any other `.toml` file in this directory whose top-level table contains
-an `[[apps]]` array is loaded. Phase A ships only `apps.toml`; future
+an `[[apps]]` array is loaded. Today only `apps.toml` ships; future
 tier-split files (`core.toml`, `desktop.toml`, etc.) would work the same
-way.
+way without dispatcher changes.
 
 ## Single `apps.toml` (or future tier-split files when large)
 
@@ -180,9 +180,9 @@ manifest and against on-disk state, flagging drift.
 
 ## Lifecycle commands — `scripts/apps-cli.sh`
 
-The CLI dispatcher exposes one subcommand per lifecycle step. Phase A
-ships `validate` as a working command; the others are stubs that print
-"available in later phases" until later tasks land.
+The CLI dispatcher exposes one subcommand per lifecycle step. Every
+subcommand is wired to real behaviour — the validator pre-flight gates
+every mutating call.
 
 | Subcommand | Purpose |
 | --- | --- |
@@ -277,6 +277,59 @@ See `schema.toml` for the field-by-field contract and
 `schema.example.toml` for a worked example exercising every method
 and both pin modes.
 
+## Browser policies — generated, not hand-edited
+
+For `firefox-esr` and `mullvad-browser`, `policies.json` is **generated**
+from a per-app `policies.json.base` template plus the
+`[[apps.browser_extensions]]` list inside that app's `[[apps]]` entry.
+
+- The generator is `scripts/lib/browser-policies-gen.py`.
+- It runs as a `pre_install` hook before the `[apps.configs]` deploy
+  copies the result to the system path
+  (`/etc/firefox-esr/policies/policies.json` or
+  `/usr/lib/mullvad-browser/distribution/policies.json`).
+- The validator's `_check_browser_extensions` enforces shape
+  (well-formed AMO slug, GUID matching one of the four legal forms, mode
+  ∈ {`force_installed`, `allowed`, `blocked`}) before the generator runs.
+- A deny-by-default `*` entry is appended automatically, so any
+  extension not on the manifest is blocked.
+
+To change the extension set, edit `apps.toml`; do NOT hand-edit the
+generated `policies.json`.
+
+## Tiers and the daily-driver app set
+
+The repo currently ships:
+
+- **Tier 1** — core privacy + security daily-drivers: `age`, `gopass`,
+  `keepassxc`, `pass`, `firefox-esr`, `mullvad-browser`, `mullvad-vpn`,
+  `signal-desktop`, `yubikey-manager`, `libpam-yubico`, plus the
+  CLI essentials (`mosh`).
+- **Tier 2** — dev tooling: `vscodium` (default) and an opt-in
+  `code` (Microsoft VSCode, disabled by default).
+- **Tier 4** — work / productivity: `aerc`, `copyq`, `flameshot` (i3),
+  `spectacle` (Plasma), `libreoffice`, `mupdf`, `okular`, `zathura`,
+  `thunderbird`, `syncthing`, `obsidian`, `drawio-desktop`, `bruno`.
+
+Pass `--tier 1,2,4` to `install-apps.sh` (or `apps-cli.sh install`)
+to install a subset. Entries with no `tier` field pass every filter.
+
+### Notes on specific entries
+
+- **obsidian** replaced Joplin as the notes editor on 2026-05-24.
+  Vaults are folders of `.md` files (no proprietary store), pairing
+  cleanly with the existing Syncthing entry for cross-machine sync.
+- **gopass + rage** install via the `direct-deb` method
+  (`pin.mode = "frozen"`) because no apt-pinned-repo is available
+  upstream. Both are sha256-pinned in `apps.toml`.
+- **jq** is a hard runtime dep for the install-method adapters
+  (`apt-pinned-repo`, `github-release`, `direct-deb`). The bootstrap
+  step in `local_setup.sh` ensures `jq` is installed before the
+  `apps_install` phase runs.
+- **signal-desktop** drops its `config.json` with mode `0600` because
+  Signal Desktop persists its SQLCipher database key into the same
+  file after first launch — world-readable would leak the key.
+
 ## Machine profiles
 
 Resolved by `resolve_profile()` in `scripts/install-apps.sh`. The
@@ -302,8 +355,16 @@ An app installs iff `machines` intersects the active set.
 | Per-app source files (for `[apps.configs]`) | `config/apps/<name>/` |
 | Per-app lockfile sidecar | `config/apps/.locks/<name>.lock` |
 | CLI dispatcher | `scripts/apps-cli.sh` |
+| Lower-level installer dispatcher | `scripts/install-apps.sh` |
 | Validator | `scripts/apps-validate.py` |
 | Method adapters | `scripts/install-methods/<method>.sh` |
+| Lockfile read/write helpers | `scripts/lib/lockfile.sh` |
+| GPG fingerprint / sig helpers | `scripts/lib/gpg-helpers.sh` |
+| Validator-gate (shared pre-flight) | `scripts/lib/validator-gate.sh` |
+| Browser policies generator | `scripts/lib/browser-policies-gen.py` |
+| XDG mime-default applier | `scripts/lib/xdg-defaults.sh` |
+| Setup-state (resume) | `scripts/lib/setup-state.sh` |
+| End-of-run report | `scripts/lib/setup-report.sh` |
 | Pin verification | `scripts/verify-pins.sh` |
 | Pin refresh | `scripts/refresh-pins.sh` |
 | Key refresh | `scripts/refresh-keys.sh` |

@@ -10,8 +10,8 @@
 # Discovery is identical to install-apps.sh / verify-pins.sh: walk
 # every .toml under config/apps/ that contains a top-level [[apps]]
 # array (skipping schema*.toml, _*.toml, .*.toml).  Files without
-# [[apps]] are silently skipped — that's the slot the legacy per-file
-# manifests still occupy during the schema-v1 → schema-v2 transition.
+# [[apps]] are silently skipped (room for future tier-split files
+# such as core.toml / desktop.toml).
 #
 # Per-method semantics:
 #   apt              skipped — no pin to refresh.
@@ -131,10 +131,10 @@ source "${SCRIPT_DIR}/lib/gpg-helpers.sh"
 #
 # Rewriting apps.toml in place requires comment/whitespace preservation
 # (the file ships hand-curated section headers and per-entry rationales
-# that the str-replace heuristic used in Phase 0 would silently destroy
-# when it can't anchor a key inside the array-of-tables shape).  We
-# rely on python3-tomlkit; if it's not installed, bail with a clean
-# error rather than fall back to a destructive strategy.
+# that a naive str-replace heuristic would silently destroy when it
+# can't anchor a key inside the array-of-tables shape).  We rely on
+# python3-tomlkit; if it's not installed, bail with a clean error
+# rather than fall back to a destructive strategy.
 #
 # Skipping the gate in --dry-run is intentional: --dry-run prints the
 # planned changes without touching disk, so tomlkit is not strictly
@@ -307,10 +307,9 @@ PY
 #   failed         upstream rejected / network / sha mismatch.
 # and REFRESH_NOTE to a human-readable one-liner.
 #
-# Phase A intentionally drops the "updated" outcome — we no longer
-# auto-rewrite version/sha on a frozen tag bump.  The user reviews the
-# drift and edits the manifest by hand (or flips pin.mode to
-# track-latest).
+# No "updated" outcome by design — we never auto-rewrite version/sha
+# on a frozen tag bump.  The user reviews the drift and edits the
+# manifest by hand (or flips pin.mode to track-latest).
 
 refresh_apt() {
     REFRESH_OUTCOME="skipped"
@@ -449,8 +448,8 @@ refresh_github_release() {
         return
     fi
 
-    # Frozen + tag drift — REFUSE to auto-rewrite.  Phase A policy:
-    # a human reviews release notes before we move a frozen pin.
+    # Frozen + tag drift — REFUSE to auto-rewrite.  Policy: a human
+    # reviews release notes before we move a frozen pin.
     REFRESH_OUTCOME="skipped"
     REFRESH_NOTE="${GH_REPO}: track-latest mode would auto-bump to ${new_tag}; frozen requires manual review (pinned=${GH_VERSION})"
 }

@@ -24,8 +24,21 @@ laptop or VM — running on Debian 12+. The model assumes:
 **Not in scope:**
 - Hardening the kernel or systemd unit defaults.
 - Container/sandbox isolation (Firejail, bubblewrap, etc.).
-- USB device control / Yubikey enforcement.
-- Browser fingerprint resistance.
+
+**Partially in scope:**
+- **Browser fingerprint resistance** — the apps subsystem ships
+  **Mullvad Browser** (fingerprint-resistant Firefox fork) alongside
+  Firefox ESR with a policies-driven privacy posture (telemetry off,
+  six force-installed add-ons: uBlock Origin, KeePassXC-Browser,
+  Privacy Badger, ClearURLs, LocalCDN, Multi-Account Containers).
+  Full arkenfox-grade fingerprint surface reduction on Firefox is
+  still on the user — see "Browser hardening" below.
+- **USB device control / YubiKey enforcement** — `libpam-yubico` and
+  `yubikey-manager` ship as tier-1 apt installs, but no PAM file is
+  edited (the daemon-side install is a hygiene-tier opt-in that
+  routes through a future `harden --yubikey` flow). `usbguard` is
+  similarly opt-in via the same hygiene tier — not installed by
+  default; see [`readme/apps.md`](apps.md) → tier 5.
 
 ---
 
@@ -412,14 +425,23 @@ won't end up in `~/.zsh_history`. Confirm with `tail ~/.zsh_history`
 after running it.
 
 ### Browser hardening
-The dotfiles bind `Mod+b` to `firefox-esr` (Debian's Firefox). For privacy:
-- Install [arkenfox-user.js](https://github.com/arkenfox/user.js/) into
-  the profile dir. Disables telemetry, sets sane defaults, kills
-  fingerprinting vectors.
-- Or replace Firefox with [Mullvad Browser](https://mullvad.net/en/browser)
-  — same engine, hardened, pairs with the Mullvad VPN you already
-  installed. Just edit the i3 binding:
-  `bindsym $mod+b exec mullvad-browser`.
+The dotfiles install **two** browsers via the apps subsystem and bind
+both in i3:
+
+- `Mod+b` → `librewolf` (when present) or `firefox-esr` (the apt-backed
+  baseline; ships with a policies.json that force-installs uBlock
+  Origin, KeePassXC-Browser, Privacy Badger, ClearURLs, LocalCDN,
+  Multi-Account Containers and locks telemetry off).
+- `Mod+Shift+b` → `mullvad-browser` — [Mullvad
+  Browser](https://mullvad.net/en/browser), fingerprint-resistant
+  Firefox fork from Mullvad. Installed from Mullvad's signed apt repo
+  (same key as the VPN). Ships a minimal extension set (uBlock +
+  KeePassXC only) to preserve Mullvad's anonymity-set.
+
+For a paranoid Firefox baseline, additionally install
+[arkenfox-user.js](https://github.com/arkenfox/user.js/) into the
+profile dir — kills fingerprinting vectors beyond what the policies
+file can cover.
 
 ### SSH key passphrase
 `ssh-copy-id` to the VM works for both passphrase-less and protected
@@ -455,7 +477,11 @@ and `sudo augenrules --load`. Verbose — only worth it if you're
 actively chasing an incident.
 
 ### USB / device control
-Out of scope. If you handle sensitive data, look at
+Hygiene-tier opt-in. `libpam-yubico` and `yubikey-manager` are
+installed as tier-1 apt packages by the apps subsystem, but no PAM
+file is edited — the daemon-side wiring is the user's call (see the
+recommended steps under "Browser hardening" / "Sensitive command
+audit" for the same pattern). For full USB lockdown look at
 [`usbguard`](https://github.com/USBGuard/usbguard).
 
 ---
@@ -535,17 +561,23 @@ together.
 
 ## Application install supply chain
 
-Phase 0 adds a formal supply-chain layer for third-party apps installed
-outside the OS suite. Every app the dotfiles install lives as a TOML
-manifest under [`config/apps/`](../config/apps/README.md); the
-dispatcher ([`scripts/install-apps.sh`](../scripts/install-apps.sh))
+Every third-party app the dotfiles install — 27 entries as of this
+writing — rides a formal supply-chain layer. All entries live in a
+single TOML manifest at [`config/apps/apps.toml`](../config/apps/apps.toml);
+the CLI dispatcher ([`scripts/apps-cli.sh`](../scripts/apps-cli.sh))
 filters by machine profile and shells out to one of four method
 adapters under `scripts/install-methods/`. The Mullvad keyring
-fingerprint pinning + starship/JetBrains-Mono sha256 + GPG checks
-documented above ("What's hardened out-of-the-box") are now the
-**migrated baseline**, not bespoke per-script logic: they're three
-manifests (`mullvad-vpn.toml`, `starship.toml`, `jetbrains-mono-nerd.toml`)
+fingerprint pinning + starship / JetBrainsMono Nerd Font sha256 + GPG
+checks documented above ("What's hardened out-of-the-box") are now the
+**baseline**, not bespoke per-script logic: they're three entries in
+that one manifest (`mullvad-vpn`, `starship`, `jetbrains-mono-nerd`),
 verified by the same `scripts/verify-pins.sh` everything else uses.
+
+The subsystem documentation lives at [`readme/apps.md`](apps.md) (trust
+ordering, schema overview, lifecycle commands, per-machine overrides);
+this section covers the security-relevant pieces — what the trust
+pillars actually verify, what the exit codes mean, and how the
+in-repo audit surface fits together.
 
 ### The three trust pillars
 
@@ -642,16 +674,20 @@ The two layers are independent:
 
 | File | Role |
 |---|---|
-| `config/apps/<name>.toml` | Per-app manifest. Filename = `meta.name`. |
+| `config/apps/apps.toml` | Primary manifest — every `[[apps]]` entry the repo installs (schema_version 2, array-of-tables). |
 | `config/apps/schema.toml` | Authoritative field-by-field schema. |
 | `config/apps/schema.example.toml` | Worked example exercising every install method. |
+| `config/apps/<name>/` | Per-app source files referenced by `[apps.configs]` (policies.json, settings.json, ini files, …). |
+| `config/apps/.locks/<name>.lock` | Lockfile sidecar — what was actually installed (TOML, one file per app, mode 0700 dir). |
 | `config/apps/README.md` | Dev guide — add/remove an app, install-method semantics, machine profiles, file map. |
-| `config/system/etc/apt/keyrings/<name>-keyring.asc` | Tracked source-of-truth keyring (apt-pinned-repo only). |
+| `config/system/etc/apt/keyrings/<name>-keyring.{asc,gpg}` | Tracked source-of-truth keyring (apt-pinned-repo only). |
 | `config/system/etc/apt/sources.list.d/<name>.sources` | DEB822 sources with `${distro_codename}` placeholder + `Signed-By:` pointer. |
+| `scripts/apps-cli.sh` | Top-level lifecycle dispatcher (validate/install/freeze/unfreeze/refresh/verify/remove). |
 | `scripts/install-methods/<method>.sh` | One adapter per install method (`apt`, `apt-pinned-repo`, `github-release`, `direct-deb`). |
 
-See [`config/apps/README.md`](../config/apps/README.md) for the full
-dev guide and the table of "files to modify when…".
+See [`readme/apps.md`](apps.md) for the subsystem reference and
+[`config/apps/README.md`](../config/apps/README.md) for the dev guide
++ the table of "files to modify when…".
 
 ---
 

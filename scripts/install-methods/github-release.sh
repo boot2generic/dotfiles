@@ -14,9 +14,9 @@
 #      releases, we cryptographically anchor the artifact to their key.
 #   3. version is pinned — no surprise upgrades.
 #
-# Pin-mode handling (Phase B):
+# Pin-mode handling:
 #   pin.mode = "frozen" (or unset): use the manifest's version +
-#       sha256_<arch>.  This is the original Phase 0 behavior.
+#       sha256_<arch>.  Hash mismatch aborts the install.
 #   pin.mode = "track-latest": query the GitHub Releases API for
 #       /repos/<repo>/releases/latest, substitute the resolved tag
 #       into {version} in asset_pattern, download, compute SHA-256 at
@@ -27,8 +27,8 @@
 #       requests per hour per source IP.  We rely on that being plenty
 #       for an interactive install on one machine; bulk-install paths
 #       that loop over many entries are NOT optimised for this.
-#       Adapters that need auth would pull GITHUB_TOKEN from env;
-#       Phase B explicitly does NOT (the user wanted minimal deps).
+#       Adapters that need auth would pull GITHUB_TOKEN from env; this
+#       adapter intentionally does NOT (minimal deps).
 #
 # Invocation contract: see scripts/install-methods/apt.sh.  Manifest
 # fields under .install.github_release:
@@ -94,8 +94,8 @@ app_name="$(get '.meta.name')"
 
 # Pin mode controls whether we trust manifest version+sha (frozen) or
 # resolve them at runtime from the GitHub Releases API (track-latest).
-# Default to "frozen" — preserves Phase 0 behaviour when the field is
-# absent or empty.
+# Default to "frozen" — strict fall-back when the field is absent or
+# empty.
 pin_mode="$(get '.pin.mode')"
 [[ -z "$pin_mode" ]] && pin_mode="frozen"
 

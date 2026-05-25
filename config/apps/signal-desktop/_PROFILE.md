@@ -1,8 +1,16 @@
 # Signal Desktop — privacy/hardening profile
 
-Deployed to `${HOME}/.config/Signal/config.json` (mode `0644`, `overlay = true`
-so a per-machine layer in `~/.config/dotfiles-local/signal-desktop/config.json`
-takes precedence).
+Deployed to `${HOME}/.config/Signal/config.json` (mode `0600`,
+`overlay = true` so a per-machine layer in
+`~/.config/dotfiles-local/signal-desktop/config.json` takes
+precedence).
+
+The `0600` mode is load-bearing: Signal Desktop persists its
+SQLCipher database key into this same `config.json` after first
+launch. World-readable would let any local process running as a
+different uid (or any user-scope package under `~/.local/`) read the
+key off disk. The repo-tracked baseline starts at `0600` so the first
+launch never has a window of `0644` exposure.
 
 ## What this profile sets
 

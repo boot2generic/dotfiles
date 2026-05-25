@@ -136,9 +136,24 @@ do_add() {
     # kscreen-doctor has no "apply file" mode of its own.
     LOG "no saved layout for ${DOCK_HASH} — learning current layout"
     run_as_user mkdir -p "$LAYOUT_DIR" 2>/dev/null || true
-    run_as_user bash -c "kscreen-doctor -j > '${LAYOUT_DIR}/${DOCK_HASH}.json'" \
-      && LOG "saved ${LAYOUT_DIR}/${DOCK_HASH}.json" \
-      || WARN "save failed — check ${LAYOUT_DIR} perms"
+    # DOCK_HASH is built from udev env vars (ID_VENDOR_ID/MODEL_ID/SERIAL_SHORT)
+    # which a malicious USB device can claim.  We MUST NOT interpolate it
+    # into a shell command (bash -c "... '${DOCK_HASH}.json'") because a
+    # serial containing a quote breaks out of the redirect and executes
+    # arbitrary code as the active graphical user.  Sanity-check the
+    # hash against a strict regex AND write via a direct path rather
+    # than shell-interpolation.
+    if [[ ! "$DOCK_HASH" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+      WARN "DOCK_HASH failed sanity check (refusing to write layout file)"
+      WARN "  hash: ${DOCK_HASH}"
+      return 0
+    fi
+    local _save_path="${LAYOUT_DIR}/${DOCK_HASH}.json"
+    if run_as_user kscreen-doctor -j > "$_save_path" 2>/dev/null; then
+      LOG "saved ${_save_path}"
+    else
+      WARN "save failed — check ${LAYOUT_DIR} perms"
+    fi
     return 0
   fi
 
@@ -195,10 +210,17 @@ print(" ".join(parts))
 _apply_layout() {
   local layout="$1"
   local args
-  args="$(python3 -c '
-import json, sys
+  # $layout is `${LAYOUT_DIR}/${DOCK_HASH}.json` where DOCK_HASH is
+  # built from udev env vars on a malicious USB device's claimed
+  # descriptors.  Interpolating it directly into Python source via
+  # shell-string substitution is a code-injection primitive — we'd be
+  # parsing attacker-chosen bytes as Python while running as root from
+  # the udev handler context.  Pass the path via env var instead so
+  # Python receives it as a string at runtime, never as source text.
+  args="$(LAYOUT_PATH="$layout" python3 -c '
+import json, os, sys
 try:
-    d = json.load(open("'"$layout"'"))
+    d = json.load(open(os.environ["LAYOUT_PATH"]))
 except Exception as e:
     sys.stderr.write(f"layout parse failed: {e}\n"); sys.exit(0)
 parts = []

@@ -13,8 +13,10 @@
 #     report_render
 #
 # The "NEEDS YOUR HAND" section is hardcoded with the manual-identity
-# checklist from the Phase A spec, plus anything caller added via
-# report_needs_action.  Colour is applied only when stdout is a TTY.
+# checklist (SSH key, git identity, GPG key, VPN account login, mail
+# account setup, Signal phone link, Syncthing pairing, KeePassXC
+# database) plus anything caller added via report_needs_action.
+# Colour is applied only when stdout is a TTY.
 #
 # A plain-text copy of the report is also saved to
 #     ~/.config/dotfiles-state/last-setup-report.txt

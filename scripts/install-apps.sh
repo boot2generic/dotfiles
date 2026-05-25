@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # scripts/install-apps.sh
 #
-# Phase A dispatcher for the dotfiles application-install system.
+# Dispatcher for the dotfiles application-install system (schema_version 2).
 # Reads every config/apps/*.toml file that contains a top-level
-# [[apps]] array (schema_version 2) — skipping schema*.toml, _*.toml,
-# and dotfiles — flattens the entries to an in-memory list, filters
-# by the current machine profile, then shells out to
-# scripts/install-methods/<method>.sh for the actual work.
+# [[apps]] array — skipping schema*.toml, _*.toml, and dotfiles —
+# flattens the entries to an in-memory list, filters by the current
+# machine profile, then shells out to scripts/install-methods/<method>.sh
+# for the actual work.
 #
 # Files that parse cleanly but contain NO [[apps]] array are silently
-# skipped.  This lets the three legacy per-file manifests coexist on
-# disk during the schema-v1 → schema-v2 transition without being
-# treated as broken.
+# skipped (so future tier-split files such as core.toml / desktop.toml
+# can be added without dispatcher changes).
 #
 # Usage:
 #     scripts/install-apps.sh [--all]                  # default
@@ -37,10 +36,10 @@
 #     and we continue.  --no-validate skips the gate entirely; use only
 #     for debugging a known-bad manifest, never for production runs.
 #
-# Install-method adapter contract (Phase B — adapters consume the
-# legacy "per-file" shape this dispatcher builds on the fly from each
-# schema-v2 entry, with pin.mode now passed through so adapters can
-# branch on track-latest vs frozen):
+# Install-method adapter contract (adapters consume a flattened
+# per-app JSON shape this dispatcher builds on the fly from each
+# schema-v2 entry; pin.mode is passed through so adapters branch on
+# track-latest vs frozen):
 #     DOTFILES_MACHINE=<profile> DRY_RUN=<0|1> REPO_DIR=<...> \
 #         LOCKFILE_PATH=<abs-path-to-lockfile> \
 #         scripts/install-methods/<method>.sh <path-to-manifest-json>
@@ -59,8 +58,8 @@
 #       "configs":{...},
 #       "hooks":  { "pre_install": [...], "post_install": [...] }
 #     }
-# pin.mode passes through to the adapter; the Phase-A drop was a
-# transitional workaround now superseded by pin-mode-aware adapters.
+# pin.mode passes through to the adapter unchanged so each adapter can
+# branch on track-latest vs frozen.
 #
 # Pin verification (verify-pins.sh):
 #     If verify-pins.sh exits 2 (signature mismatch) or 3 (no manifest
@@ -282,15 +281,14 @@ else:
 #     → meta.{name,display_name,machines,description,docs_url,enabled}
 #   entry.install     → install      (unchanged shape)
 #   entry.pin         → pin          (pass-through, INCLUDING pin.mode
-#                                     so Phase B adapters can branch on
-#                                     track-latest vs frozen)
+#                                     so adapters branch on track-latest
+#                                     vs frozen)
 #   entry.configs     → configs      (unchanged)
 #   entry.hooks       → hooks        (unchanged)
-#   entry.browser_extensions → DROPPED for adapters (Phase B concern)
-#
-# Phase A dropped pin.mode here so Phase 0 adapters wouldn't trip on
-# an unknown field; Phase B adapters consume the field directly, so
-# the workaround is no longer needed.
+#   entry.browser_extensions → DROPPED for adapters
+#                              (consumed by browser-policies-gen.py
+#                              earlier via pre_install hook, not by the
+#                              method adapter).
 entry_to_legacy_json() {
   local entry_json="$1"
   python3 -c '
@@ -305,8 +303,8 @@ out = {"meta": meta}
 if isinstance(entry.get("install"), dict):
     out["install"] = entry["install"]
 if isinstance(entry.get("pin"), dict):
-    # Pass pin through verbatim — including pin.mode, which Phase B
-    # adapters branch on (github-release frozen vs track-latest, etc.).
+    # Pass pin through verbatim — including pin.mode, which adapters
+    # branch on (github-release frozen vs track-latest, etc.).
     pin = dict(entry["pin"])
     out["pin"] = pin
 if isinstance(entry.get("configs"), dict):
@@ -602,11 +600,10 @@ install_one() {
   local first_profile
   first_profile="${active_profiles%% *}"
 
-  # Phase B lockfile contract: dispatcher computes the path, adapter writes
-  # the file.  Layout matches the design doc — one file per app under
-  # config/apps/.locks/<name>.lock.  In DRY_RUN the env var is still set
-  # (so adapters can echo "would write to ...") but adapters MUST NOT
-  # actually touch the file.
+  # Lockfile contract: dispatcher computes the path, adapter writes
+  # the file.  One file per app under config/apps/.locks/<name>.lock.
+  # In DRY_RUN the env var is still set (so adapters can echo "would
+  # write to ...") but adapters MUST NOT actually touch the file.
   local lockfile_path="${REPO_DIR}/config/apps/.locks/${name}.lock"
 
   local adapter_rc=0

@@ -18,7 +18,10 @@
 #         as the install user (NOT root) so the binding lands in
 #         $XDG_CONFIG_HOME/mimeapps.list, not /etc.
 #
-# Phase A: no [xdg_defaults] table exists yet → call is a no-op.
+# `apps.toml` does not currently declare an [xdg_defaults] table, so
+# the call is a no-op on a stock checkout.  Add the table when you
+# want xdg-mime defaults applied; the library will pick it up
+# automatically.
 
 # ── Module-local logger ────────────────────────────────────────────
 _xdg_defaults_log()  { printf '[xdg-defaults] %s\n' "$*" >&2; }
@@ -48,7 +51,7 @@ xdg_defaults_apply() {
   fi
 
   if [[ ! -f "$apps_toml" ]]; then
-    # Manifest absent — Phase A's expected state on a fresh checkout.
+    # Manifest absent — silent no-op.
     return 0
   fi
 
@@ -79,7 +82,7 @@ PY
   fi
 
   if [[ -z "$pairs" ]]; then
-    # No [xdg_defaults] table or empty table — Phase A's normal case.
+    # No [xdg_defaults] table or empty table — silent no-op.
     return 0
   fi
 

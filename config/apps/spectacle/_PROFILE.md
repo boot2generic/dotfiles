@@ -32,6 +32,15 @@ Open Spectacle → `Configure Spectacle…`:
 - **General** → uncheck **Use light background** unless you
   specifically need it.
 
+## Override (per-machine)
+
+Spectacle reads from `~/.config/spectaclerc`. This profile does not
+deploy a managed file (the upstream defaults are already privacy-
+aligned); per-machine tweaks happen through the GUI under
+`Configure Spectacle…` and land in that same `spectaclerc`. There is
+no `~/.config/dotfiles-local/spectacle/` overlay because there is
+no repo-tracked baseline to override.
+
 ## i3 alternative
 
 The flameshot profile is the i3 counterpart — see

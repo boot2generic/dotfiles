@@ -258,18 +258,30 @@ ensure_sudo() {
   # `sudo -v` needs a TTY when `Defaults use_pty` is set, which is the
   # default on Ubuntu/Debian — so this path only works in interactive runs.
   sudo -v || die "sudo authentication failed (configure NOPASSWD or run interactively)."
-  # BOUNDED keepalive: the old `while true; do … sleep 60; done` would
-  # outlive a `kill -9` of the parent (the EXIT trap doesn't fire on
-  # SIGKILL) and keep refreshing sudo's timestamp until next reboot.
-  # Cap at SUDO_KEEPALIVE_MINUTES (default 90) — long enough for the
-  # slowest end-to-end install (nvidia + nvim + everything), short
-  # enough that an orphaned keepalive isn't an indefinite leak.
+  # BOUNDED + PARENT-DEATH keepalive:
+  #   • Bounded: SUDO_KEEPALIVE_MINUTES (default 90) caps the worst-case
+  #     duration even if every signal-trap fails.
+  #   • Parent-death: each iteration probes the parent PID with `kill -0`
+  #     and exits immediately if the parent has died — so SIGKILL of the
+  #     parent (which the EXIT/HUP/INT/TERM trap below CANNOT catch)
+  #     still ends the keepalive within ~60s instead of running for the
+  #     full SUDO_KEEPALIVE_MINUTES timeout.  Captures PPID before the
+  #     fork so the subshell sees the dotfiles process, not its own PID.
   local minutes="${SUDO_KEEPALIVE_MINUTES:-90}"
-  ( for _ in $(seq 1 "$minutes"); do sudo -n true 2>/dev/null || exit 0; sleep 60; done ) &
+  local _parent_pid=$$
+  ( for _ in $(seq 1 "$minutes"); do
+        # If parent died (incl. via SIGKILL), bail.  `kill -0 PID`
+        # returns 0 if the process still exists for OUR uid; non-zero
+        # otherwise (ESRCH or EPERM).  Neither leaks sudo's timestamp.
+        kill -0 "$_parent_pid" 2>/dev/null || exit 0
+        sudo -n true 2>/dev/null || exit 0
+        sleep 60
+    done ) &
   SUDO_KEEPALIVE_PID=$!
   # Trap HUP/INT/TERM in addition to EXIT so common kill paths (Ctrl-C,
-  # `kill <pid>`, ssh disconnect → SIGHUP) also reap the child.  `kill -9`
-  # remains uncatchable, but the bounded loop above caps that scenario.
+  # `kill <pid>`, ssh disconnect → SIGHUP) reap the child immediately.
+  # SIGKILL is uncatchable but the kill -0 probe above limits the
+  # blast radius to ≤60 s of stale sudo-timestamp keepalive.
   trap '[[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT HUP INT TERM
 }
 
@@ -1124,33 +1136,33 @@ install_papirus_folders() {
     return 0
   fi
   # Fallback: download the standalone script from GitHub and install it
-  # to /usr/local/bin.  Pinned to a specific release tag to avoid
-  # tracking an ever-moving HEAD.  If Papirus release their script at a
-  # later tag, update the URL + SHA256 below.
-  local url="https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-folders/20230301/papirus-folders"
-  local sha256="VERIFY"   # update with: sha256sum papirus-folders
+  # to /usr/local/bin.  Pinned to a specific release tag + SHA-256 to
+  # avoid tracking an ever-moving HEAD or accepting a tag-rewrite.  If
+  # Papirus releases a later tag, update url + sha256 + version in the
+  # same commit (run `sha256sum papirus-folders` from a verified clone).
+  local url="https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-folders/v1.14.0/papirus-folders"
+  local sha256="b30a6848a00690302accffc050549218b0b114d3178b28bd3a16891817821b06"
   local tmp
-  tmp="$(mktemp)"   # respects $TMPDIR; avoids predictable /tmp symlink race
-  if ! curl -fsSL "$url" -o "$tmp"; then
+  tmp="$(mktemp -t papirus-folders.XXXXXX.sh)"   # mktemp -t = no predictable name
+  # shellcheck disable=SC2064  # intentional early-binding of $tmp
+  trap "rm -f '$tmp'" RETURN
+  if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp"; then
     warn "could not fetch papirus-folders from GitHub — skipping"
-    rm -f "$tmp"
     return 1
   fi
-  # Integrity check — update sha256 above on version bump.
-  if [[ "$sha256" != "VERIFY" ]]; then
-    if ! echo "${sha256}  ${tmp}" | sha256sum --check --quiet 2>/dev/null; then
-      err "papirus-folders checksum mismatch — refusing to install."
-      err "  expected: $sha256"
-      err "  got: $(sha256sum "$tmp" | cut -d' ' -f1)"
-      rm -f "$tmp"
-      return 1
-    fi
-  else
-    warn "papirus-folders SHA256 not pinned in local_setup.sh — skipping integrity check"
-    warn "  update VERIFY in install_papirus_folders() with: sha256sum papirus-folders"
+  # Integrity check — pinned SHA-256 is a HARD REQUIREMENT.  A drift
+  # here is a supply-chain alarm (tag rewrite or repo compromise);
+  # refuse to install rather than warn-and-proceed.
+  if ! echo "${sha256}  ${tmp}" | sha256sum --check --quiet 2>/dev/null; then
+    err "papirus-folders checksum mismatch — refusing to install."
+    err "  url:      $url"
+    err "  expected: $sha256"
+    err "  got:      $(sha256sum "$tmp" | cut -d' ' -f1)"
+    err "  if upstream legitimately re-cut the tag, bump url + sha256"
+    err "  in the same commit; do NOT just bump sha256."
+    return 1
   fi
   sudo install -m 755 "$tmp" /usr/local/bin/papirus-folders
-  rm -f "$tmp"
   if have papirus-folders; then
     ok "papirus-folders installed (/usr/local/bin)"
   else

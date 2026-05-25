@@ -5,9 +5,8 @@
 # schema-v2 layout, manifests are TOML array-of-tables: any .toml file
 # (other than schema*.toml, _*.toml, .*.toml) containing a top-level
 # [[apps]] list is loaded and every entry verified.  Files that parse
-# cleanly but lack [[apps]] are silently skipped — that's the slot the
-# legacy per-file manifests still occupy on disk during the schema-v1 →
-# schema-v2 transition.
+# cleanly but lack [[apps]] are silently skipped (room for future
+# tier-split files such as core.toml / desktop.toml).
 #
 # Called by install-apps.sh (pre-flight), audit.sh (drift sweep),
 # dotfiles-doctor.sh (health), and conky's check_pins() panel.  The
@@ -234,10 +233,10 @@ days_since() {
 # shellcheck source=lib/gpg-helpers.sh
 source "${SCRIPT_DIR}/lib/gpg-helpers.sh"
 
-# gpg_verify_pinned() was factored into scripts/lib/gpg-helpers.sh in
-# Phase B so the github-release install adapter can reuse it.  The
-# `source` line above pulls in both fingerprint_of and gpg_verify_pinned;
-# see the library file for the trust model and rationale.
+# gpg_verify_pinned() lives in scripts/lib/gpg-helpers.sh so the
+# github-release install adapter can reuse it.  The `source` line above
+# pulls in both fingerprint_of and gpg_verify_pinned; see the library
+# file for the trust model and rationale.
 
 # Per-entry verifier.  Sets RESULT_STATUS / RESULT_REASON / etc. via
 # globals (bash has no struct return; this keeps the call-site readable).

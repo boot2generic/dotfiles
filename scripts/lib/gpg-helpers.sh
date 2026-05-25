@@ -63,15 +63,13 @@ fingerprint_of() {
 # Verify a detached signature against an artifact, asserting that the
 # SIGNING key matches a manifest-pinned 40-hex fingerprint.
 #
-# Originally defined inline in verify-pins.sh; factored here in Phase B
-# so the github-release install adapter can reuse the same trust model
-# (verify-pins is read-only audit; the adapter is the actual install
-# path).  Behaviour is byte-for-byte identical to the prior verify-pins
-# helper — see verify-pins.sh's "Trust limitation" notes for why the
+# Factored here so verify-pins.sh (read-only audit) and the
+# github-release install adapter (actual install path) share one trust
+# model.  See verify-pins.sh's "Trust limitation" notes for why the
 # keyring is /dev/null and why we gate on the [GNUPG:] status line
 # rather than gpg's exit code.
 #
-# Trust limitation (intentional, Phase A->B carryover):
+# Trust limitation (intentional):
 #   Until per-app pinned keyrings ship on disk, this check confirms
 #   only "the signature was made by the right fingerprint" — NOT "and
 #   we trust that key".  We refuse to consult the user's default gnupg
@@ -82,7 +80,7 @@ fingerprint_of() {
 #
 # Args: <sig-file> <data-file> <pinned-fingerprint-40hex>
 # Stdout: single short status string for caller to surface as reason:
-#   "fpr-match-untrusted"  — sig made by the pinned fpr (OK pre-Phase B keyrings)
+#   "fpr-match-untrusted"  — sig made by the pinned fpr (no per-app keyring on disk)
 #   "no-sig" / "no-data" / "bad-pin" / "no-sig-info"
 #   "fpr-mismatch:expected=… got=…"
 # Exit: 0 on fpr-match, non-zero otherwise.

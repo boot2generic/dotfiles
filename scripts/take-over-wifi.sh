@@ -431,8 +431,15 @@ if (( NEEDED_INTERFACES_EDIT )); then
         # Anything else passes through untouched.
         { print }
     ' /etc/network/interfaces \
-        | sudo install -m 0644 /dev/stdin /etc/network/interfaces.new \
-        && sudo mv /etc/network/interfaces.new /etc/network/interfaces
+        | sudo install -m 0644 /dev/stdin /etc/network/interfaces.new
+    # The install + mv is a two-step root-privileged operation; a Ctrl-C
+    # between them leaves /etc/network/interfaces.new behind.  Cleanup
+    # trap reaps the stale .new file on any exit path (success, error,
+    # signal) so /etc/network/ never accumulates dotfiles-generated
+    # crud.  The mv itself is atomic on the same filesystem (rename(2)).
+    trap 'sudo rm -f /etc/network/interfaces.new 2>/dev/null || true' EXIT
+    sudo mv /etc/network/interfaces.new /etc/network/interfaces
+    trap - EXIT
     ok "commented out $WIFI_IFACE block in /etc/network/interfaces"
 fi
 

@@ -2,23 +2,48 @@
 
 A self-contained desktop environment for **Debian 12 / 13 / newer**, themed in
 matching neon cyan/magenta colours across every tool. Drop the repo on a
-machine, run one script, get a fully-configured i3wm + tmux + neovim setup.
+machine, run one script, get a fully-configured i3wm + tmux + neovim setup —
+plus a manifest-driven app installer (~27 third-party apps with pinned GPG +
+sha256 trust paths), a Plasma 6 / Wayland alternative desktop, hardened
+sudo / DoT / auditd posture, and a security-monitoring conky overlay.
 
 ```
 ┌────────────┬──────────────────────────────────────────────────┐
-│ WM         │  i3 (tiling) + i3-gaps                           │
-│ Compositor │  picom (xrender on VMs, glx on physical)         │
-│ Bar        │  polybar (cyberpunk theme)                       │
-│ Launcher   │  rofi                                            │
-│ Notif      │  dunst                                           │
-│ Lockscreen │  i3lock + ImageMagick (custom neon overlay)      │
+│ WM         │  i3 (tiling) + i3-gaps  — or Plasma 6 / Wayland  │
+│ Compositor │  picom (xrender on VMs, glx on physical)  / KWin │
+│ Bar        │  polybar (cyberpunk theme)  / Plasma panel       │
+│ Launcher   │  rofi  / KRunner                                 │
+│ Notif      │  dunst  / KNotifications                         │
+│ Lockscreen │  i3lock + ImageMagick  / kscreenlocker           │
 │ Terminal   │  alacritty (JetBrainsMono Nerd Font)             │
 │ Shell      │  zsh + oh-my-zsh + starship                      │
 │ Multiplex  │  tmux + tpm + tmux-resurrect                     │
 │ Editor     │  neovim + lazy.nvim (LSP + treesitter + cmp)     │
+│ Apps       │  27 entries — KeePassXC, Signal, Mullvad, etc.   │
 │ Wallpaper  │  procedurally generated (Pillow)                 │
 └────────────┴──────────────────────────────────────────────────┘
 ```
+
+## What's here
+
+- **One-shot install** (`./local_setup.sh setup`) with **i3** (default) or
+  **Plasma 6 / Wayland** (`--plasma`); idempotent, --bypass for unattended.
+- **Application install subsystem** — 27 third-party apps installed from a
+  single `config/apps/apps.toml` manifest. Four install methods
+  (`apt`, `apt-pinned-repo`, `github-release`, `direct-deb`), GPG +
+  SHA-256 pinned, full freeze/unfreeze/refresh/verify/remove lifecycle. See
+  [`readme/apps.md`](readme/apps.md).
+- **Opt-in hardening** (`./local_setup.sh harden`) — narrow sudo, ufw,
+  unattended security updates, auditd, DNS-over-TLS via systemd-resolved.
+  [`readme/security.md`](readme/security.md) has the threat model.
+- **Conky security monitoring** — always-on overlay tracks critical-file +
+  SUID drift, sudo invocations, daemon→shell parent anomalies, DoT live
+  state, periodic-reconnect beacons, suspicious listeners, supply-chain
+  pin freshness.
+- **CLI counterparts** — `scripts/{audit,dotfiles-doctor,apps-cli,verify-pins,refresh-pins,refresh-keys}.sh`
+  for SSH + cron use.
+- **Four install paths** — local-desktop, remote-VM, remote-server,
+  shell-only (incl. air-gapped via a build-bundle).
 
 ---
 
@@ -45,6 +70,13 @@ Are you provisioning THIS machine (sitting at the console / SSH'd in)?
     └── Remote is a server (shell-only, no GUI)
           → Path C:  ./scripts/provision-server.sh user@host
 ```
+
+Path A's setup pipeline is five stages: **install → deploy → apps →
+terminal → validate**. The **apps** stage (stage 3 of 5) runs the
+manifest-driven application installer — see
+[`readme/apps.md`](readme/apps.md). Skip with `--no-apps`; restrict to
+specific tiers with `--apps=tier1,tier4`; walk the pipeline without
+installing with `--apps-dry-run`.
 
 ### Feature-parity matrix
 
@@ -85,45 +117,70 @@ What each path supports, at a glance.  Rows are capabilities; cells are `✓` (s
 | **Laptop suspend + dock hooks** (chassis-gated; T14) | ✓ | ✗ | – | – |
 | **NVIDIA Wayland session env + explicit-sync** (NVIDIA-only) | ✓ (`--plasma`) | ✗ | – | – |
 | **Per-monitor refresh / VRR / HDR baseline** (`kscreen-baseline.py`) | ✓ (`--plasma`) | ✗ | – | – |
+| **Apps subsystem** (manifest-driven 3rd-party installs, 27 entries) | ✓ (stage 3 of 5) | ✗ | – | – |
+| **`apt` install method** | ✓ | – | – | – |
+| **`apt-pinned-repo` install method** (40-hex GPG fingerprint + deb822) | ✓ | – | – | – |
+| **`github-release` install method** (sha256 + optional GPG VALIDSIG) | ✓ | – | – | – |
+| **`direct-deb` install method** (frozen-only; sha256-pinned) | ✓ | – | – | – |
+| **Browser policies generator** (Firefox ESR + Mullvad Browser) | ✓ | ✗ | – | – |
+| **Per-app lockfile sidecars** (`config/apps/.locks/<name>.lock`) | ✓ | – | – | – |
+| **`freeze` / `unfreeze` / `refresh` / `verify` / `remove` lifecycle** | ✓ | – | – | – |
+| **Per-machine apps overrides** (`~/.config/dotfiles-local/apps.toml`) | ✓ | – | – | – |
+| **Supply-chain conky overlay row + `dotfiles-doctor.sh` SUPPLY CHAIN** | ✓ | ✗ | – | – |
 
 **Where shell-only paths share code:** Path C and Path D both source `scripts/lib/install-common.sh` for package lists, distro detection, oh-my-zsh / tpm / starship / fd-bat-symlink / default-shell logic.  Adding a tool there propagates to both.
 
 **Where the full-GUI paths diverge:** Path A is the canonical implementation; Path B is the older SSH-pexpect mirror and is intentionally NOT at full feature parity (see the `✗` cells above).  If you want the modern full-GUI behavior on a remote VM, the recommended workflow is: `git push` your dotfiles repo, `git clone` it on the VM, run `./local_setup.sh setup --bypass` there directly.  Path B is kept for the niche case of fully unattended end-to-end setup of a virgin VM via pexpect.
 
-### Application installs (Phase 0)
+### Application installs (apps subsystem)
 
 A second install layer lives beside the per-host overrides: a
 manifest-driven application installer at
-[`config/apps/`](config/apps/README.md). One TOML file per third-party
-app, four install methods (`apt`, `apt-pinned-repo`, `github-release`,
+[`config/apps/`](config/apps/README.md). One consolidated TOML
+([`config/apps/apps.toml`](config/apps/apps.toml), 27 entries today),
+four install methods (`apt`, `apt-pinned-repo`, `github-release`,
 `direct-deb`), schema-validated, with pinned GPG fingerprints + SHA-256
-hashes that get verified before anything lands on disk. The dispatcher
-([`scripts/install-apps.sh`](scripts/install-apps.sh)) filters by the
-machine profile set (`common` always; `t14` on DMI chassis 8/9/10/14;
-`desktop` on detected NVIDIA) and shells out to one of four adapters
-under `scripts/install-methods/`.
+hashes that get verified before anything lands on disk. The CLI
+dispatcher ([`scripts/apps-cli.sh`](scripts/apps-cli.sh)) filters by the
+active machine profile (`common` always; `t14` on DMI chassis 8/9/10/14;
+`desktop` on detected NVIDIA; `i3` or `plasma` on the recorded session),
+optionally by `--tier`, and shells out to one of four adapters under
+`scripts/install-methods/`.
 
-Phase 0 ships infrastructure only — the dispatcher, four adapters, three
-pin-workflow scripts, and three migrated existing pins (starship,
-JetBrains Mono Nerd Font, Mullvad VPN). No new apps are installed yet;
-the existing inline install paths in `local_setup.sh` keep working.
+The apps stage runs as **stage 3 of 5** inside `./local_setup.sh setup`
+(install → deploy → **apps** → terminal → validate); the installer
+itself is also invokable standalone:
 
 ```bash
-./scripts/install-apps.sh --list                 # what would run on this machine
-./scripts/install-apps.sh --app starship --dry-run
-./scripts/verify-pins.sh                         # 0 fresh / 1 stale / 2 bad / 3 typo
-./scripts/refresh-pins.sh --all                  # weekly cron; mutates TOML, never commits
-./scripts/refresh-keys.sh --app mullvad-vpn      # interactive, single-app key rotation
+./scripts/apps-cli.sh validate                    # hard gate — every mutating cmd runs this first
+./scripts/apps-cli.sh list                        # NAME / METHOD / TIER / PIN-MODE / VERSION / INSTALLED
+./scripts/apps-cli.sh install                     # install every app matching this machine's profile
+./scripts/apps-cli.sh install --tier 1,4          # privacy/sec + work tiers only
+./scripts/apps-cli.sh install --app obsidian --dry-run
+./scripts/apps-cli.sh status   --app obsidian     # manifest + lockfile + live state
+./scripts/apps-cli.sh freeze   --app obsidian     # lock to currently-installed version + sha
+./scripts/apps-cli.sh refresh                     # re-fetch upstream metadata, bump last_refreshed
+./scripts/apps-cli.sh verify                      # 0 fresh / 1 stale / 2 bad / 3 typo
+./scripts/apps-cli.sh remove   --app obsidian     # method-aware uninstall + drop lockfile
+./scripts/refresh-keys.sh --app mullvad-vpn       # interactive, single-app key rotation
 ```
+
+Pin modes are explicit: `track-latest` (manifest is the audit log; apt
+or the upstream channel picks the version) vs `frozen` (manifest carries
+version + sha256; installer refuses on hash mismatch — required for
+`direct-deb`, recommended for `github-release`). Per-app lockfile
+sidecars at `config/apps/.locks/<name>.lock` record what's actually on
+disk, separately from what the manifest wants.
 
 A stale or failing pin shows up in three places: the conky HEALTH
 overlay's `supply chain` row (see "Beyond install — monitoring +
-drift" below), `scripts/dotfiles-doctor.sh`'s new SUPPLY CHAIN section,
-and `scripts/audit.sh`'s `pins` row. See
-[`config/apps/README.md`](config/apps/README.md) for the field-by-field
-schema, the add-an-app workflow, and how the dispatcher hands off to
-each adapter. The supply-chain trust pillars (apt repo signing, SHA-256
-pinning, optional GPG `VALIDSIG`) are documented in
+drift" below), `scripts/dotfiles-doctor.sh`'s SUPPLY CHAIN section,
+and `scripts/audit.sh`'s `pins` row. See [`readme/apps.md`](readme/apps.md)
+for the subsystem reference (trust ordering, schema overview, tier
+system, lifecycle commands, per-machine overrides, add/remove
+checklists) and [`config/apps/README.md`](config/apps/README.md) for
+the dev-facing companion. The supply-chain trust pillars (apt repo
+signing, SHA-256 pinning, optional GPG `VALIDSIG`) are documented in
 [`readme/security.md`](readme/security.md) → "Application install
 supply chain".
 
@@ -582,7 +639,8 @@ The single most-used keybinds. Each tool has its own page with the full set.
 | `Mod+d`                  | Rofi app launcher                   |
 | `Mod+Tab`                | Rofi window switcher                |
 | `Mod+e`                  | Open Thunar (file manager)          |
-| `Mod+b`                  | Open Firefox (`firefox-esr`)        |
+| `Mod+b`                  | Open LibreWolf (hardened Firefox)   |
+| `Mod+Shift+b`            | Open Mullvad Browser                |
 | `Mod+h/j/k/l`            | Focus left / down / up / right      |
 | `Mod+Shift+h/j/k/l`      | Move window                         |
 | `Mod+1..0`               | Switch to workspace 1..10           |
@@ -677,6 +735,7 @@ of the box. Desktops without those keys can use the `Mod+F-row` fallback.
 | [vpn](readme/vpn.md)                   | Mullvad + WireGuard — install, polybar, kill switch  |
 | [security](readme/security.md)         | Threat model, harden/unharden, what's still on you   |
 | [system](readme/system.md)             | Audio, brightness, clipboard, network, screenshots   |
+| [apps](readme/apps.md)                 | Apps subsystem — apps.toml, install methods, lifecycle commands, tiers |
 | [nix](readme/nix.md)                   | Nix package manager (apt-default, Nix-opt-in model)  |
 
 The `scripts/` directory holds smaller utilities that don't have their
@@ -691,7 +750,9 @@ own page yet. The most-used ones, with one-line summaries:
 | `scripts/dotfiles-doctor.sh`          | One-page workstation health report (DRIFT + SYSTEM + NETWORK + DEPLOY sections); the standalone counterpart to the conky HEALTH panel. Shells out to `audit.sh` for the drift block. Flags: `--brief`, `--no-color`. Nagios-style exit codes (0 OK / 1 WARN / 2 BAD). |
 | `scripts/take-over-wifi.sh`           | Hands wifi from ifupdown / iwd / wpa_supplicant / systemd-networkd to NetworkManager — pre-imports SSID/PSK from `/etc/network/interfaces` into NM before stopping the old backend so reconnect is automatic. Run by `local_setup.sh setup` automatically when applicable; can also be invoked by hand. `--revert` undoes the takeover (restores the most recent `/etc/network/interfaces.bak.<TS>`, removes the NM conf.d snippet, re-enables the prior backend). |
 | `scripts/diagnose-wifi.sh`            | Read-only diagnostic dump for "wifi isn't working". Redacts wpa-psk / wpa-passphrase / wpa-password / wpa-preshared-key / wpa-wep-key* / wpa-eappsk / wpa-identity / wpa-anonymous-identity / wpa-private-key* / wpa-pin and replaces wpa-passphrase-file / wpa-psk-file paths with `<REDACTED-PATH>`. Safe to paste into a bug report. |
-| `scripts/install-apps.sh`             | Manifest-driven application installer. Discovers `config/apps/*.toml`, resolves the machine profile (`common`/`t14`/`desktop`), and dispatches each app to its method adapter under `scripts/install-methods/`. Flags: `--all` (default), `--app NAME`, `--list`, `--dry-run`, `--profile NAME`, `--help`. Adapter contract: exit 0 success/intentional-skip, 1 pre-flight failure, 2 installation error. See [`config/apps/README.md`](config/apps/README.md). |
+| `scripts/apps-cli.sh`                 | Top-level apps-subsystem dispatcher. Subcommands: `validate`, `list`, `install`, `status`, `freeze`, `unfreeze`, `refresh`, `verify`, `remove`. Mutating subcommands run the validator as a pre-flight gate. See [`readme/apps.md`](readme/apps.md). |
+| `scripts/install-apps.sh`             | Per-stage installer dispatched by `apps-cli.sh install`. Loads `config/apps/apps.toml`, resolves the machine profile (`common`/`t14`/`desktop`/`i3`/`plasma`), filters by `--tier` when given, and dispatches each app to its method adapter under `scripts/install-methods/`. Flags: `--all` (default), `--app NAME`, `--list`, `--dry-run`, `--profile NAME`, `--tier T[,T,…]`, `--no-validate`, `--help`. Adapter contract: exit 0 success/intentional-skip, 1 pre-flight failure, 2 installation error. |
+| `scripts/apps-validate.py`            | Schema validator. Reads every `config/apps/*.toml` (skipping `schema*.toml`, `_*.toml`, dotfiles), enforces field shapes, mutual-exclusion rules between method subtables, pin-mode constraints, and config-source existence. Exit 0 clean, 1 errors, 2 warnings-only. Hard pre-flight gate for every mutating apps-cli subcommand. |
 | `scripts/verify-pins.sh`              | Read-only verification of every `config/apps/<name>.toml` pin block — sha256 / GPG fingerprint / freshness against `last_refreshed + refresh_after_days`. Called by `install-apps.sh` (pre-flight), `audit.sh`, `dotfiles-doctor.sh`, and conky's `check_pins()`. Exit codes are the contract: 0 ok, 1 stale, 2 verification fail, 3 `--app NAME` matched no manifest. Flags: `--all`, `--app NAME`, `--json`, `--strict-fresh` (stale → exit 2 for cron). |
 | `scripts/refresh-pins.sh`             | Periodic pin refresher — pulls upstream metadata, rewrites `last_refreshed` (and version + sha256 for `github-release` on a tag bump) in-place into the TOML. **Never** auto-commits — a clean `git diff` is the review surface. Per-method behaviour: `apt` skipped, `apt-pinned-repo` runs a scoped `apt-get update` (bumps date if signed Release verifies; logs CRITICAL on key rotation), `github-release` recomputes SHAs on tag drift, `direct-deb` does a HEAD liveness check only. Flags: `--all`, `--app NAME`, `--method NAME`, `--dry-run`, `--quiet`. |
 | `scripts/refresh-keys.sh`             | Interactive, manual-only, single-app keyring rotation for `apt-pinned-repo` apps. Downloads `key_url`, compares fingerprints, on accept atomically swaps `config/system/etc/apt/keyrings/<keyring_file>` and updates `key_fingerprint` in the TOML. Append-only audit log at `~/.cache/dotfiles/key-rotations.log`. No `--all` by design — each rotation is its own security event. Flags: `--app NAME` (required), `--yes`. |
@@ -721,7 +782,7 @@ it's a silent no-op when the host can't use it:
 ├── vm_automation.py           ← remote VM setup over SSH
 ├── local_setup.sh             ← local-machine setup (Debian 12+)
 ├── config/                    ← all dotfiles, deployed to ~/.config/<name>
-│   ├── apps/                  ← per-app TOML manifests (Phase 0 dispatcher input)
+│   ├── apps/                  ← consolidated apps.toml (27 entries) + per-app sources + .locks/
 │   ├── i3/                    ← i3wm
 │   ├── tmux/                  ← tmux.conf
 │   ├── nvim/                  ← init.lua + lazy.nvim plugins
@@ -748,8 +809,11 @@ it's a silent no-op when the host can't use it:
     ├── provision-server.sh    ← shell-only setup of a remote server over SSH
     ├── install-shell.sh       ← shell-only setup of THIS machine (online or --offline)
     ├── build-bundle.sh        ← builds bundle/ for `install-shell.sh --offline`
-    ├── install-apps.sh        ← Phase 0 application-install dispatcher (reads config/apps/*.toml)
+    ├── apps-cli.sh            ← apps lifecycle dispatcher (validate/list/install/status/freeze/unfreeze/refresh/verify/remove)
+    ├── install-apps.sh        ← per-stage installer dispatched by apps-cli.sh install
+    ├── apps-validate.py       ← schema validator (hard gate for every mutating subcommand)
     ├── install-methods/       ← per-method adapters (apt, apt-pinned-repo, github-release, direct-deb)
+    ├── lib/                   ← lockfile.sh, browser-policies-gen.py, gpg-helpers.sh, validator-gate.sh, install-common.sh, …
     ├── verify-pins.sh         ← read-only pin verification (exit 0/1/2/3 = ok/stale/bad/typo)
     ├── refresh-pins.sh        ← periodic pin refresher (rewrites TOML in place, never commits)
     ├── refresh-keys.sh        ← manual, interactive, single-app keyring rotation

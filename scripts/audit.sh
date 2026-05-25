@@ -481,7 +481,13 @@ audit_one() {
     local name="$1"
     local base_file="${BASELINE_DIR}/baseline-${name}.txt"
 
-    mkdir -p "$BASELINE_DIR"
+    # Tighten baseline directory mode: 0700 so other local users can't
+    # read the system fingerprint we stash here (baseline-critical-files
+    # contains SHA-256 of /etc/shadow when sudo -n is available;
+    # baseline-ports/modules/suid leak listener/SUID inventories).
+    # Matches health.py::check_critical_file_drift, which already did
+    # the right thing.
+    install -d -m 0700 "$BASELINE_DIR"
 
     local current
     if ! current="$(gen_current "$name" 2>/dev/null)"; then
@@ -497,8 +503,9 @@ audit_one() {
 
     if [[ ! -f "$base_file" ]]; then
         # First run — write the baseline and report dim, matching the
-        # behaviour of check_*_drift() in health.py.
-        if printf '%s\n' "$current" > "$base_file" 2>/dev/null; then
+        # behaviour of check_*_drift() in health.py.  Mode 0600 so the
+        # baseline isn't world-readable.
+        if printf '%s\n' "$current" | install -m 0600 /dev/stdin "$base_file" 2>/dev/null; then
             DIFF_STATUS="dim"
             DIFF_SUMMARY="baseline set ($(echo "$current" | grep -c '.' || true))"
         else
@@ -534,8 +541,10 @@ if [[ -n "$REFRESH" ]]; then
     if [[ -z "$current" ]]; then
         die "Couldn't regenerate current state for '$REFRESH'."
     fi
-    mkdir -p "$BASELINE_DIR"
-    printf '%s\n' "$current" > "$base_file"
+    # Same 0700/0600 hardening as audit_one (don't leak the system
+    # fingerprint to other local users).
+    install -d -m 0700 "$BASELINE_DIR"
+    printf '%s\n' "$current" | install -m 0600 /dev/stdin "$base_file"
     ok "baseline refreshed: $base_file ($(echo "$current" | grep -c '.' || true) lines)"
     exit 0
 fi

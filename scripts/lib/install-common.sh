@@ -112,9 +112,25 @@ common_link_debian_aliases() {
     fi
 }
 
-# ── starship — apt/dnf if available, upstream curl|sh otherwise ───
+# ── starship — apt/dnf if available, pinned tarball otherwise ─────
 # Idempotent: skips if already on PATH or in ~/.local/bin/.
-# Mitigates curl|sh by enforcing TLS-only and refusing downgrades.
+#
+# Trust path:
+#   • apt/dnf — distro-signed package.
+#   • Tarball fallback — github release at a pinned version, sha256-
+#     anchored via the upstream .sha256 sidecar.  This mirrors what
+#     local_setup.sh::install_starship does on the workstation install
+#     path so all 4 install entry-points share the same integrity model.
+#   • We DO NOT pipe upstream's install.sh to a shell — the script bytes
+#     are not pinned and a maintainer-account compromise of starship.rs
+#     would yield silent RCE on every minimal install.
+#
+# Manifest-pin source-of-truth: config/apps/apps.toml::starship lists
+# the same version + sha256.  When that pin bumps, bump _STARSHIP_*
+# below in the same commit.
+_STARSHIP_VERSION="v1.25.1"
+_STARSHIP_SHA256_X86_64="4488c11ca632327d1f1f16fb2f102c0646094c35479cd5435991385da43c61ac"
+
 common_install_starship() {
     if command -v starship >/dev/null 2>&1 \
        || [[ -x "$HOME/.local/bin/starship" ]]; then
@@ -137,14 +153,47 @@ common_install_starship() {
             fi
             ;;
     esac
-    log "starship not in distro repos — using upstream installer"
-    if curl --proto '=https' --tlsv1.2 -sSfL https://starship.rs/install.sh \
-       | sh -s -- --yes >/dev/null 2>&1; then
-        ok "starship via upstream installer"
-    else
-        warn "starship install failed — prompt won't render correctly"
+    log "starship not in distro repos — installing from pinned tarball"
+
+    local arch
+    arch="$(uname -m)"
+    # Only x86_64 has a pinned hash in this lib; arm64 falls through to
+    # the upstream installer with TLS-pinning + post-download sha
+    # verification disabled, because upstream doesn't publish an
+    # arm64-gnu tarball (only musl).  Document this explicitly so the
+    # caller knows the trust model degrades there.
+    if [[ "$arch" != "x86_64" ]]; then
+        warn "starship pinned tarball only covers x86_64 — refusing curl|sh on $arch"
+        warn "  install starship manually for now; arm64-musl support is a follow-up"
         return 1
     fi
+
+    local tarball_url sha_url tarball tmpdir
+    tarball_url="https://github.com/starship/starship/releases/download/${_STARSHIP_VERSION}/starship-${arch}-unknown-linux-gnu.tar.gz"
+    tmpdir="$(mktemp -d -t starship-install.XXXXXX)"
+    # shellcheck disable=SC2064  # intentional early-binding of $tmpdir
+    trap "rm -rf '$tmpdir'" RETURN
+    tarball="$tmpdir/starship.tar.gz"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$tarball_url" -o "$tarball"; then
+        warn "starship tarball download failed — prompt won't render correctly"
+        return 1
+    fi
+    if ! echo "${_STARSHIP_SHA256_X86_64}  ${tarball}" \
+            | sha256sum --check --quiet 2>/dev/null; then
+        err "starship sha256 mismatch — refusing to install"
+        err "  expected: $_STARSHIP_SHA256_X86_64"
+        err "  got:      $(sha256sum "$tarball" | cut -d' ' -f1)"
+        err "  if upstream cut a new release, bump _STARSHIP_VERSION + sha in the same commit"
+        return 1
+    fi
+    if ! tar --no-same-owner --no-same-permissions --no-overwrite-dir \
+              --no-acls --no-xattrs \
+              -xzf "$tarball" -C "$tmpdir" starship 2>/dev/null; then
+        warn "starship tarball extraction failed"
+        return 1
+    fi
+    install -D -m 0755 "$tmpdir/starship" "$HOME/.local/bin/starship"
+    ok "starship installed from pinned tarball ($_STARSHIP_VERSION)"
 }
 
 # ── oh-my-zsh — git clone (or copy from $1 if present) ────────────

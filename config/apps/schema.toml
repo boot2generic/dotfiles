@@ -1,4 +1,4 @@
-# config/apps/schema.toml — authoritative schema reference (Phase A, schema_version = 2)
+# config/apps/schema.toml — authoritative schema reference (schema_version = 2)
 #
 # WHY this file exists:
 #   This is the contract every entry inside `config/apps/apps.toml` (and any
