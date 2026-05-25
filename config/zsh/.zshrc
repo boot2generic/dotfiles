@@ -42,6 +42,14 @@ export XDG_CACHE_HOME="$HOME/.cache"
 # Local binaries
 export PATH="$HOME/.local/bin:$PATH"
 
+# VPN split-tunnel shim dir.  Managed by scripts/vpn-exclude.sh — each
+# file in there is a wrapper that exec's `mullvad-exclude <real-binary>`
+# so the app bypasses the Mullvad tunnel.  We prepend the dir BEFORE
+# ~/.local/bin so shims for tools installed under ~/.local/bin (e.g.
+# claude, installed via npm) still get intercepted.
+[[ -d "$HOME/.local/bin/vpn-excluded" ]] && \
+  export PATH="$HOME/.local/bin/vpn-excluded:$PATH"
+
 # /usr/sbin houses tools we *use* as a regular user — `tlp-stat`,
 # `iw dev`, `rfkill list`, `powertop`, `nft list ruleset`, …  Debian's
 # default /etc/profile only adds /usr/sbin for root, which makes the

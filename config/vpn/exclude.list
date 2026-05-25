@@ -1,0 +1,38 @@
+# config/vpn/exclude.list
+#
+# Applications that should bypass the Mullvad VPN tunnel via
+# split-tunneling.  scripts/vpn-exclude.sh reads this file, finds each
+# binary on PATH, and generates a wrapper at
+#     ~/.local/bin/vpn-excluded/<app>
+# that exec's `mullvad-exclude <real-binary> "$@"`.  The shim dir is
+# prepended to PATH by ~/.zshrc so the shim is what gets invoked when
+# you type the app name in a shell.
+#
+# Per-machine override:
+#     ~/.config/dotfiles-local/vpn-exclude.list
+# If that file exists, it REPLACES this one entirely (mirrors the rest
+# of the dotfiles-local override pattern).  Use it when one machine
+# needs a different exclusion set without diverging the repo.
+#
+# CLI:
+#     scripts/vpn-exclude.sh add <app>     — append to whichever file is active
+#     scripts/vpn-exclude.sh remove <app>  — drop from whichever file is active
+#     scripts/vpn-exclude.sh list          — show effective set + shim status
+#     scripts/vpn-exclude.sh apply         — regenerate shims (idempotent)
+#     scripts/vpn-exclude.sh status        — mullvad daemon + shim dir health
+#
+# Syntax:
+#   • One application name per line.
+#   • Lines starting with `#` are comments.
+#   • Empty lines are ignored.
+#   • Whitespace around names is stripped.
+#   • App names must be plain (no slashes, ≤ 64 chars, [A-Za-z0-9._-] only).
+#
+# Trust note:
+#   The `mullvad-exclude` binary is provided by `mullvad-vpn` (Tier 1).
+#   Without it the shim degrades to running the bare command — same as
+#   if no VPN were active.  No traffic is leaked accidentally.
+
+# AI tools that misbehave under Mullvad's exit IPs (rate-limit triggers,
+# regional content blocks, captchas).
+claude

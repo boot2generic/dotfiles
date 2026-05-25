@@ -118,6 +118,91 @@ Full reference: `mullvad --help`, `man mullvad`.
 
 ---
 
+## Persistent split-tunneling — `scripts/vpn-exclude.sh`
+
+`mullvad split-tunnel pid add <pid>` is a one-shot — works for a single
+process, doesn't survive restart, doesn't apply to new launches.  For
+apps you want **always** excluded (AI tools that get rate-limited by
+Mullvad exit IPs, CDN-fronted services that fingerprint VPN ranges as
+hostile, etc.), the dotfiles ship a name-based list + shim mechanism.
+
+### Mechanism
+
+The list lives at one of two paths (per-machine wins when both exist —
+mirrors every other dotfiles-local override):
+
+```text
+config/vpn/exclude.list                       # repo default
+~/.config/dotfiles-local/vpn-exclude.list     # per-machine override
+```
+
+Format: one app name per line, `#` comments, names match
+`^[A-Za-z0-9._-]+$` (length ≤ 64, no leading dot).
+
+`scripts/vpn-exclude.sh apply` reads the active list, resolves each
+name to an absolute path, and writes a wrapper at
+`~/.local/bin/vpn-excluded/<name>` that exec's
+`/usr/bin/mullvad-exclude <real-binary> "$@"`.  Your `.zshrc` prepends
+`~/.local/bin/vpn-excluded/` to PATH, so typing the app name picks up
+the shim transparently — `which claude` resolves to the wrapper, not
+the underlying binary.  Apps installed under `~/.local/bin/` (e.g.
+`claude` via npm) are intercepted correctly because the shim dir is
+PATH-precedent to `~/.local/bin/` itself.
+
+### CLI
+
+```bash
+./scripts/vpn-exclude.sh list         # effective set + shim status
+./scripts/vpn-exclude.sh status       # daemon state + PATH sanity
+./scripts/vpn-exclude.sh add claude   # add app + regenerate shims
+./scripts/vpn-exclude.sh remove claude
+./scripts/vpn-exclude.sh apply        # re-run after editing the list by hand
+```
+
+`add` is idempotent + seeds `~/.config/dotfiles-local/vpn-exclude.list`
+from the repo default the first time you call it — subsequent edits
+live in the per-machine file, the repo stays untouched.
+
+### What's in the default list
+
+```text
+claude   # AI tools that misbehave under Mullvad's exit IPs
+```
+
+That's it.  Add anything else with `add <name>` — `firefox-esr` if you
+want a vanilla-IP browser session, `apt` if your apt mirror blocks
+VPNs, `gh` if GitHub rate-limits your tunnel exit, etc.
+
+### Verification
+
+```bash
+mullvad connect                                          # bring the tunnel up
+curl -s https://am.i.mullvad.net/connected | head -1     # confirms inside-tunnel IP
+mullvad-exclude curl -s https://am.i.mullvad.net/connected | head -1   # confirms outside-tunnel IP
+which claude                                             # → ~/.local/bin/vpn-excluded/claude
+claude --version                                          # automatically routes outside the tunnel
+```
+
+The shim only matters when the tunnel is up — when Mullvad is
+disconnected, `mullvad-exclude` is a no-op pass-through.  No traffic
+leaks if the daemon is offline.
+
+### GUI launchers (.desktop files)
+
+KDE/i3 launchers exec the binary directly from `/usr/share/applications/`
+or `/usr/bin/`, bypassing your shell's PATH lookup — so the shim
+isn't invoked when you click an app from a launcher.  Three options:
+
+1. **Launch from the shell** (the simple case — typing the name works).
+2. **Override the .desktop file**: copy
+   `/usr/share/applications/<app>.desktop` to
+   `~/.local/share/applications/<app>.desktop` and prefix `Exec=` with
+   `mullvad-exclude `.  User-local copies override system ones.
+3. **Symlink the shim into a launcher path**: out of scope for the
+   current tool — file an issue if you need it.
+
+---
+
 ## WireGuard — drop-in configs
 
 If you already have WireGuard `.conf` files (e.g., from Mullvad's
