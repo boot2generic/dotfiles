@@ -1,0 +1,28 @@
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DontCheckDefaultClient": true,
+    "OfferToSaveLogins": false,
+    "PasswordManagerEnabled": false,
+    "DisableAppUpdate": true,
+    "AppAutoUpdate": false,
+    "RequestedLocales": ["en-US"],
+    "DisableFormHistory": true,
+    "DisableMasterPasswordCreation": false,
+    "UserMessaging": {
+      "WhatsNew": false,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "SkipOnboarding": true,
+      "MoreFromMozilla": false
+    },
+    "ExtensionSettings": {
+      "*": {
+        "installation_mode": "blocked",
+        "blocked_install_message": "Extensions are managed by dotfiles policy"
+      }
+    },
+    "DisableFirefoxAccounts": false,
+    "DisableSystemAddonUpdate": true
+  }
+}

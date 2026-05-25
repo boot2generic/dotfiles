@@ -1,18 +1,33 @@
-# config/apps/schema.toml — authoritative schema reference
+# config/apps/schema.toml — authoritative schema reference (Phase A, schema_version = 2)
 #
 # WHY this file exists:
-#   This is the contract every per-app manifest under config/apps/<name>.toml
-#   MUST honor.  The dispatcher (scripts/install-apps.sh) reads each manifest,
-#   converts it to JSON via Python's tomllib, then hands the JSON to an
-#   install-method adapter (scripts/install-methods/<method>.sh).  Any
-#   deviation here ripples through verify-pins.sh, refresh-pins.sh, audit.sh,
-#   conky's check_pins(), dotfiles-doctor.sh, etc., so changes require a
-#   coordinated cross-file edit.
+#   This is the contract every entry inside `config/apps/apps.toml` (and any
+#   future tier-split sibling such as `core.toml` / `desktop.toml`) MUST honor.
+#   The dispatcher (scripts/apps-cli.sh + scripts/apps-validate.py + the
+#   downstream installer scripts) reads each manifest, converts it to JSON via
+#   Python's tomllib, then hands the JSON to an install-method adapter under
+#   `scripts/install-methods/<method>.sh`.  Any deviation here ripples through
+#   verify-pins.sh, refresh-pins.sh, audit.sh, conky's check_pins(),
+#   dotfiles-doctor.sh, etc., so changes require a coordinated cross-file edit.
 #
-#   This file is NEVER loaded as a real manifest — schema*.toml and _*.toml
-#   names are filtered out by the dispatcher's glob.  It exists ONLY as
-#   documentation that lives next to the data it describes (so the docs
-#   can never drift out of the same directory).
+#   This file is NEVER loaded as a real manifest — names matching
+#   `schema*.toml`, `_*.toml`, or `.*.toml` are filtered out by the validator
+#   and the dispatcher.  It exists ONLY as documentation that lives next to
+#   the data it describes (so the docs can never drift out of the same
+#   directory).
+#
+# What changed in schema_version 2 (vs. the old per-file schema):
+#   • The entire repo is now a single `config/apps/apps.toml` using TOML's
+#     array-of-tables syntax: `[[apps]]` blocks listed in install-method
+#     order, alphabetical within each method group.
+#   • A new top-level `schema_version` integer key gates layout migrations.
+#   • A new `[apps.pin] mode = "track-latest" | "frozen"` field controls
+#     whether the manifest carries a hard version+sha pin or defers to apt
+#     (or some other upstream channel) for version selection.
+#   • Browser policy generators consume an optional
+#     `[[apps.browser_extensions]]` array per app.
+#   • Lockfile sidecars live under `config/apps/.locks/<name>.lock` — see
+#     README.md for the format.
 #
 # Field naming conventions:
 #   • snake_case for keys
@@ -21,118 +36,231 @@
 #   • SHA-256 in lowercase 64-hex
 #   • GPG fingerprints in UPPERCASE 40-hex, no spaces
 #
-# See schema.example.toml for a heavily-commented worked example.
+# See schema.example.toml for a heavily-commented worked example covering
+# every method and both pin modes.
 
 # ============================================================
-# [meta] — required, identifies the app and its scope
+# top-level: schema_version
 # ============================================================
-[meta]
-# `name` is the canonical key.  For apt-installed apps, this is the apt
-# package name; for github-release apps, it's the binary's name on $PATH
-# (used as the lookup key in verify-pins.sh / conky's check_pins() / audit).
-name = "<string, required>"
+# REQUIRED at the top of every apps.toml-shaped file.  The validator refuses
+# any unknown integer.  Currently the only legal value is 2.  Bumping this
+# is reserved for backwards-incompatible layout changes — adding optional
+# fields does NOT require a bump.
+schema_version = 2
+
+# ============================================================
+# [[apps]] — one TOML table per installed app
+# ============================================================
+# An apps.toml file contains zero or more [[apps]] entries.  Order is
+# significant for human review (apt → apt-pinned-repo → github-release →
+# direct-deb; alphabetical within a group) but NOT for installation — the
+# dispatcher sorts internally.
+[[apps]]
+
+# `name` is the canonical key.  Conventions:
+#   • kebab-case, ≤64 chars, regex ^[a-z0-9][a-z0-9-]*[a-z0-9]$
+#   • UNIQUE across every [[apps]] entry in every apps.toml-shaped file
+#     loaded by the dispatcher.  The validator rejects collisions.
+#   • For apt-installed apps this is typically the apt package name; for
+#     github-release apps it's the binary's name on $PATH (used as the
+#     lookup key in verify-pins.sh / conky's check_pins() / audit.sh / the
+#     lockfile sidecar filename `.locks/<name>.lock`).
+name = "<kebab-case string, required>"
 
 # Human-readable label.  Falls back to `name` when omitted.  Used in
-# dispatcher progress logs and the --list table.
+# dispatcher progress logs, the `apps-cli.sh list` table, and the doctor
+# summary.
 display_name = "<string, optional>"
 
 # Which machine profiles install this app.  Empty array == install never;
-# omit the key for the same effect.  Recognized profiles (see resolve_profile
-# in scripts/install-apps.sh):
-#   "common"  — every machine
-#   "t14"     — laptops (DMI chassis 8/9/10/14, mirrors is_laptop_chassis)
-#   "desktop" — boxes with an Nvidia GPU (PCI vendor id 10de)
-# The dispatcher installs the app iff machines ∩ resolved_profiles is non-empty.
-machines = ["<one or more strings>"]
+# omit the key for the same effect (the validator warns either way).
+# Recognized profiles (see resolve_profile in scripts/install-apps.sh):
+#   "common"   — every machine
+#   "t14"      — laptops (DMI chassis 8/9/10/14, mirrors is_laptop_chassis)
+#   "desktop"  — boxes with an Nvidia GPU (PCI vendor id 10de)
+#   "i3"       — i3-flavor sessions
+#   "plasma"   — plasma-flavor sessions
+# The dispatcher installs the app iff machines ∩ resolved_profiles is
+# non-empty.  Unknown profile names emit a WARNING but do NOT error.
+machines = ["common"]
 
-# Free-form blurb shown in --list and the dev guide.  No length cap; one
-# sentence is fine.  Optional.
+# Free-form blurb shown in `apps-cli.sh list` and the dev guide.  No length
+# cap; one sentence is fine.  Optional.
 description = "<string, optional>"
 
 # Upstream docs / homepage.  Optional but strongly recommended — audit.sh
 # can surface broken upstream links during a stale-pin sweep.
 docs_url = "<URL, optional>"
 
+# When false, the validator parses the entry normally but downstream tools
+# treat the app as absent (used by per-machine overrides to switch
+# something off without deleting the entry).  Defaults to true when
+# omitted.
+enabled = true
+
+# Tier — optional integer 1-5 used by `install-apps.sh --tier` to install
+# subsets of the manifest.  The convention (mirrors README.md):
+#   1 = core privacy / sec daily-drivers
+#   2 = dev tooling
+#   3 = virtualization
+#   4 = work / productivity
+#   5 = system hygiene (opt-in via `harden`)
+# Entries with no `tier` field pass every --tier filter (treated as "no
+# tier", always installed regardless of which subset was requested).
+tier = 1
+
 # ============================================================
-# [install] — required, picks the install-method adapter
+# [apps.install] — required, picks the install-method adapter
 # ============================================================
-[install]
+[apps.install]
 # Exactly one of:
 #   "apt"             — install from already-enabled apt sources
 #   "apt-pinned-repo" — add a third-party repo (gpg-verified) then apt-install
 #   "github-release"  — download a release asset, sha256-verify, drop on disk
 #   "direct-deb"      — download a .deb (sha256-verified) and `dpkg -i`
 # Each value maps 1:1 to scripts/install-methods/<value>.sh.
+#
+# Trust ordering (most → least, mirrored in README.md):
+#   apt > apt-pinned-repo > github-release > direct-deb
 method = "<one of: apt | apt-pinned-repo | github-release | direct-deb>"
 
-# Optional override of meta.name when the apt package name differs from
-# the binary name (e.g. `bat` ships as `batcat` on Debian).  For non-apt
-# methods this key is ignored.
-package = "<string, optional>"
+# Optional override of `name` when the apt package name differs from the
+# binary name (e.g. `bat` ships as `batcat` on Debian).  Honored ONLY for
+# method = "apt".  For other methods the package name lives inside the
+# method-specific subtable below.
+package = "<string, optional, apt-only>"
 
 # ============================================================
-# [install.apt_pinned_repo] — REQUIRED when method = "apt-pinned-repo"
-#                             FORBIDDEN otherwise (the dispatcher does
-#                             not enforce this, but reviewers should)
+# [apps.install.apt_pinned_repo] — REQUIRED iff method = "apt-pinned-repo"
+#                                  FORBIDDEN otherwise
 # ============================================================
-[install.apt_pinned_repo]
-package         = "<string, required>"      # apt package name to install
-suite_url       = "<URL>"                   # https://download.example.com/apt
-suite           = "<string>"                # release name; may contain the
-                                            # literal token $(distro_codename)
-                                            # which the adapter substitutes with
-                                            # `lsb_release -cs` at install time
-components      = ["<string>", "..."]       # e.g. ["main"] or ["stable", "non-free"]
-key_url         = "<URL>"                   # armored or binary GPG key URL
-key_fingerprint = "<40 uppercase hex, no spaces>"
-                                            # MUST match the key fetched from
-                                            # key_url; refresh-keys.sh enforces.
-keyring_file    = "<basename>.gpg"          # dropped under
-                                            # config/system/etc/apt/keyrings/
-sources_file    = "<basename>.sources"      # dropped under
-                                            # config/system/etc/apt/sources.list.d/
+[apps.install.apt_pinned_repo]
+# Apt package name to install once the repo is registered.  Required.
+package         = "<string>"
+
+# Suite root URL.  Required.  No trailing slash.
+suite_url       = "<URL>"
+
+# Release name.  May contain the literal token $(distro_codename) which the
+# adapter substitutes with `lsb_release -cs` at install time — lets one
+# manifest serve trixie / bookworm / future Debian releases.  Required.
+suite           = "<string>"
+
+# At least one component (e.g. ["main"] or ["stable", "non-free"]).
+# Required, non-empty.
+components      = ["<string>", "..."]
+
+# Armored or binary GPG key URL.  Required.
+key_url         = "<URL>"
+
+# MUST match the key fetched from key_url.  Exactly 40 hexadecimal chars,
+# UPPERCASE convention, no spaces.  refresh-keys.sh enforces; verify-pins
+# warns on mismatch.  Required.
+key_fingerprint = "<40 uppercase hex>"
+
+# Basename (no path separators) — the adapter drops the keyring under
+# /etc/apt/keyrings/<keyring_file> from the tracked copy under
+# config/system/etc/apt/keyrings/.  Required.
+keyring_file    = "<basename>"
+
+# Basename (no path separators) — the adapter drops the deb822 sources
+# file under /etc/apt/sources.list.d/<sources_file> from the tracked copy
+# under config/system/etc/apt/sources.list.d/.  Required.
+sources_file    = "<basename>"
 
 # ============================================================
-# [install.github_release] — REQUIRED when method = "github-release"
+# [apps.install.github_release] — REQUIRED iff method = "github-release"
+#                                 FORBIDDEN otherwise
 # ============================================================
-[install.github_release]
-repo            = "<org/repo>"              # e.g. "sharkdp/bat"
-asset_pattern   = "<glob>"                  # MUST include {arch}; e.g.
-                                            # "bat-v{version}-{arch}-unknown-linux-gnu.tar.gz"
-version         = "<tag>"                   # e.g. "v0.24.0"
-install_to      = "<absolute path>"         # /usr/local/bin/<name> for binaries,
-                                            # /opt/<name>/ for trees
-sha256_x86_64   = "<64 hex>"                # mandatory on amd64
-sha256_aarch64  = "<64 hex or empty>"       # mandatory on arm64 if you support it;
-                                            # leave "" to declare "x86_64-only"
-gpg_fingerprint = "<40 hex or empty>"       # set when upstream signs releases
-                                            # (e.g. starship); empty disables the
-                                            # signature check in verify-pins.sh
-extract_path    = "<rel path or empty>"     # for tar/zip archives: relative
-                                            # path inside the archive to the
-                                            # binary/tree we actually want.
-                                            # Empty for raw single-file assets.
+[apps.install.github_release]
+# `<owner>/<repo>` — regex ^[\w.-]+/[\w.-]+$.  Required.
+repo            = "<org/repo>"
+
+# Asset filename glob.  May reference {version} and {arch} placeholders;
+# the adapter substitutes the current version (from the `version` field
+# below, when present) and `uname -m`-derived arch ("x86_64"/"aarch64").
+# Required.
+asset_pattern   = "<glob>"
+
+# Absolute filesystem path where the adapter installs the result.
+# Required; MUST start with `/`.  Examples:
+#   • /usr/local/bin/<name>          (single binary)
+#   • /opt/<name>/                   (directory tree)
+#   • /usr/local/share/fonts/<name>  (font bundle)
+install_to      = "<absolute path>"
+
+# Pinned upstream tag (e.g. "v1.25.1").  REQUIRED when pin.mode = "frozen";
+# FORBIDDEN (or empty string) when pin.mode = "track-latest".  Stored
+# verbatim — no auto-stripping of the leading "v".
+version         = "<tag, conditional>"
+
+# Mandatory amd64 hash when frozen; FORBIDDEN when track-latest.
+sha256_x86_64   = "<64 lowercase hex, conditional>"
+
+# OPTIONAL arm64 hash.  Empty string ("") declares "x86_64-only" — keep
+# the key present so verify-pins doesn't flag arm64 as missing.
+# FORBIDDEN when track-latest.
+sha256_aarch64  = "<64 lowercase hex or empty string, optional>"
+
+# OPTIONAL detached-signature fingerprint.  40 UPPERCASE hex chars, no
+# spaces, when set; empty string ("") disables the signature check
+# (e.g. starship and nerd-fonts don't sign).
+gpg_fingerprint = "<40 uppercase hex or empty string, optional>"
+
+# OPTIONAL path inside the archive to the binary/tree the adapter should
+# install.  Relative, no leading slash.  Empty string for raw single-file
+# assets (when the asset itself IS the binary).
+extract_path    = "<rel path or empty string, optional>"
 
 # ============================================================
-# [install.direct_deb] — REQUIRED when method = "direct-deb"
+# [apps.install.direct_deb] — REQUIRED iff method = "direct-deb"
+#                             FORBIDDEN otherwise
 # ============================================================
-[install.direct_deb]
-url     = "<URL>"                           # direct https:// link to the .deb
-sha256  = "<64 hex>"                        # mandatory; no signature-fallback
-version = "<string>"                        # human label; lets us spot drift
-                                            # without re-parsing the URL
+# direct-deb is "frozen only" — pin.mode MUST be "frozen" when this method
+# is used.  All three fields below are mandatory.
+[apps.install.direct_deb]
+# Stable https:// URL to the .deb.  Required.
+url     = "<URL>"
+
+# 64 lowercase hex chars.  Required; no signature-fallback.
+sha256  = "<64 lowercase hex>"
+
+# Human label — lets us spot drift without re-parsing the URL.  Required.
+version = "<string>"
 
 # ============================================================
-# [pin] — required for any method except plain "apt"
-#         (apt is implicitly pinned by the OS suite)
+# [apps.pin] — REQUIRED for every entry, every method
 # ============================================================
-[pin]
-last_refreshed     = "<YYYY-MM-DD>"         # set by refresh-pins.sh
-refresh_after_days = 90                     # audit.sh / conky check_pins() flags
-                                            # pins past their refresh date.
+[apps.pin]
+# Pin discipline.  Required.  Two modes:
+#   "track-latest"
+#       The manifest carries no version/sha hard pin.  The dispatcher
+#       defers to apt / the upstream channel for version selection.
+#       Lockfile sidecar at config/apps/.locks/<name>.lock records
+#       whatever was actually installed.  Legal ONLY for method ∈
+#       {apt, apt-pinned-repo}.
+#   "frozen"
+#       The manifest carries a hard pin (version + sha256) and the
+#       installer refuses on hash mismatch.  Lockfile sidecar mirrors the
+#       manifest values.  REQUIRED for direct-deb (no other option).
+#       Permitted for github-release and apt-pinned-repo as well — in the
+#       apt-pinned-repo case the validator allows it but the install path
+#       still has to defer to apt (frozen here is a "this is the version
+#       we've audited" annotation, not a hard pin).
+mode               = "track-latest"
+
+# Last time someone re-verified the upstream values.  REQUIRED when
+# mode = "frozen"; OPTIONAL but strongly recommended when
+# mode = "track-latest" (acts as a "we last looked at this" timestamp).
+# ISO-8601 (YYYY-MM-DD).
+last_refreshed     = "<YYYY-MM-DD>"
+
+# Days after last_refreshed before audit.sh / conky check_pins() flag the
+# pin as stale.  OPTIONAL; default 90.  Positive integer.
+refresh_after_days = 90
 
 # ============================================================
-# [configs] — optional, deploys post-install dotfiles
+# [apps.configs] — OPTIONAL, deploys post-install dotfiles
 # ============================================================
 # Map of <absolute dest path> → table with:
 #   source  : path relative to config/apps/<name>/   (rooted in this repo)
@@ -140,23 +268,48 @@ refresh_after_days = 90                     # audit.sh / conky check_pins() flag
 #   overlay : when true, ~/.config/dotfiles-local/<name>/<basename> takes
 #             precedence over the in-repo source.  Lets a machine keep
 #             local-only tweaks without diverging the repo.
-[configs]
-# "/home/USER/.config/example-app/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
+#
+# The validator ERRORs if any referenced `source` does not exist under
+# config/apps/<name>/.
+[apps.configs]
+# "/home/$USER/.config/example-app/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
 
 # ============================================================
-# [[hooks.pre_install]] / [[hooks.post_install]] — optional
+# [[apps.hooks.pre_install]] / [[apps.hooks.post_install]] — OPTIONAL
 # ============================================================
 # Arrays of tables; commands run in array order, sequentially, as the
-# install user (NOT root — use sudo inside if you need it).  Placeholders:
+# install user (NOT root — use sudo inside if you need elevation).
+# Placeholders the adapter substitutes:
 #   {app_dir}  — config/apps/<name>/ absolute path
-#   {name}     — meta.name
+#   {name}     — apps[i].name
 # Non-zero exit from a hook aborts the install (exit code 2 per the
 # dispatcher contract).
 #
-# [[hooks.pre_install]]
-# description = "blow away a stale config the package would otherwise refuse to overwrite"
-# command     = "rm -f /etc/{name}/legacy.conf"
+# [[apps.hooks.pre_install]]
+# description = "blow away a stale config the package would refuse to overwrite"
+# command     = "sudo rm -f /etc/{name}/legacy.conf"
 #
-# [[hooks.post_install]]
+# [[apps.hooks.post_install]]
 # description = "enable the systemd unit we just dropped"
 # command     = "sudo systemctl enable --now {name}.service"
+
+# ============================================================
+# [[apps.browser_extensions]] — OPTIONAL, only meaningful for browsers
+# ============================================================
+# Consumed by scripts/lib/browser-policies-gen.py to merge into the
+# browser's `policies.json`.  Only honored when apps[i].name ∈
+# {firefox-esr, mullvad-browser, librewolf, ...} — see the generator's
+# allowlist.  Otherwise the validator ignores these stanzas.
+#
+# Per-entry uniqueness: `guid` must be unique within the parent app.
+#
+# [[apps.browser_extensions]]
+# name      = "uBlock Origin"               # human label, REQUIRED
+# guid      = "uBlock0@raymondhill.net"     # AMO ID, REQUIRED.  Legal forms:
+#                                           #   <slug>@<domain.tld>
+#                                           #   {UUID-form}
+#                                           #   <slug>@jetpack
+#                                           #   <addon-id>@<vendor>
+# amo_slug  = "ublock-origin"               # ^[a-z0-9-]+$, REQUIRED
+# mode      = "force_installed"             # "force_installed"|"allowed"|"blocked"
+# version   = "1.55.0"                      # OPTIONAL semver to pin a version

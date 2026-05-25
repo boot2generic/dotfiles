@@ -1,0 +1,19 @@
+# Phase C — declarative apt source for VSCodium.
+#
+# VSCodium is the FLOSS rebuild of Microsoft VSCode — same Electron app
+# with the proprietary Microsoft branding, telemetry, and EULA-tied
+# marketplace stripped out.  Extensions come from Open VSX Registry
+# (open-vsx.org) by default; the Microsoft-marketplace-only extensions
+# (e.g. ms-python.python, ms-vscode-remote.*) do NOT work here by design.
+#
+# Signing-key fingerprint pinned in config/apps/apps.toml.  Source of
+# truth (rotation cadence multi-year):
+#   https://vscodium.com/#install
+#   https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo
+
+Types: deb
+URIs: https://paulcarroty.gitlab.io/vscodium-deb-rpm-repo/debs
+Suites: vscodium
+Components: main
+Architectures: amd64 arm64
+Signed-By: /etc/apt/keyrings/vscodium-keyring.gpg

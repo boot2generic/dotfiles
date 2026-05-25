@@ -1,0 +1,32 @@
+{
+  "//": "User preferences extracted from this machine's ~/.config/Code/User/settings.json",
+  "workbench.secondarySideBar.defaultVisibility": "hidden",
+  "workbench.colorTheme": "Dracula Theme",
+  "workbench.iconTheme": "vscode-icons",
+
+  "//privacy": "Hardening layered on top of user prefs — telemetry/auto-update/walkthroughs off",
+  "telemetry.telemetryLevel": "off",
+  "telemetry.enableCrashReporter": false,
+  "telemetry.enableTelemetry": false,
+  "redhat.telemetry.enabled": false,
+
+  "//updates": "Apt manages updates — disable in-app update channel",
+  "update.mode": "none",
+  "update.showReleaseNotes": false,
+  "extensions.autoUpdate": false,
+  "extensions.autoCheckUpdates": false,
+
+  "//ux": "No first-run walkthroughs, no experiments, no NLP search",
+  "workbench.enableExperiments": false,
+  "workbench.settings.enableNaturalLanguageSearch": false,
+  "workbench.welcomePage.walkthroughs.openOnInstall": false,
+  "workbench.startupEditor": "none",
+
+  "//trust": "Trust banner off — modal-on-every-folder breaks flow; safer alternative is the file/folder allowlist",
+  "security.workspace.trust.banner": "never",
+  "security.workspace.trust.startupPrompt": "never",
+
+  "//git": "No autofetch background network calls; no implicit parent-repo discovery",
+  "git.autofetch": false,
+  "git.openRepositoryInParentFolders": "never"
+}

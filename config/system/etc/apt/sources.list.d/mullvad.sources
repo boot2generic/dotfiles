@@ -8,7 +8,7 @@
 #   subtable; the Phase 0 adapter consumes it but Phase 0 is additive,
 #   so the legacy .list path keeps running untouched.
 #
-#   The codename is left as ${distro_codename}; the adapter substitutes
+#   The codename is left as $(distro_codename); the adapter substitutes
 #   `lsb_release -cs` at install time so one source line works across
 #   trixie / bookworm / future Debian releases.
 #
@@ -18,7 +18,7 @@
 
 Types: deb
 URIs: https://repository.mullvad.net/deb/stable
-Suites: ${distro_codename}
+Suites: $(distro_codename)
 Components: main
 Architectures: amd64
 Signed-By: /etc/apt/keyrings/mullvad-keyring.asc

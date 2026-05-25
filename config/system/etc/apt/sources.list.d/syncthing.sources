@@ -1,0 +1,22 @@
+# Phase C — declarative apt source for Syncthing.
+#
+# The apt-pinned-repo adapter consumes the descriptor at
+# config/apps/apps.toml::name=syncthing and deploys this deb822 sources
+# file to /etc/apt/sources.list.d/syncthing.sources at install time,
+# alongside the tracked keyring at
+# config/system/etc/apt/keyrings/syncthing-keyring.gpg.
+#
+# Syncthing publishes a single "syncthing" suite (not a Debian codename)
+# with a "stable" component.  Architectures: all (Syncthing ships amd64,
+# arm64, armhf, i386).
+#
+# Signing-key fingerprint pinned in config/apps/apps.toml.  Source of
+# truth (rotation cadence multi-year):
+#   https://apt.syncthing.net/
+
+Types: deb
+URIs: https://apt.syncthing.net/
+Suites: syncthing
+Architectures: amd64 arm64
+Components: stable
+Signed-By: /etc/apt/keyrings/syncthing-keyring.gpg

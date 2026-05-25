@@ -137,6 +137,31 @@
 #                                     project flake-based dev shells.
 #                                     Apt remains the system PM either
 #                                     way.
+#   --no-apps                         Skip the apps stage entirely.
+#                                     Default is to run it: validate
+#                                     config/apps/apps.toml and install
+#                                     every enabled app whose machines
+#                                     list intersects this profile.
+#                                     Honors `enabled = false` per-entry
+#                                     (e.g., the opt-in `code` entry).
+#   --apps-dry-run                    Walk the apps install pipeline
+#                                     (validator + profile/tier filters +
+#                                     adapter dispatch) but install
+#                                     NOTHING.  Useful for a single-
+#                                     command end-to-end test that
+#                                     touches no system state.  Mixes
+#                                     cleanly with --apps=tier1,tier4.
+#                                     Implies no sudo prompt for the
+#                                     apps stage (other stages still
+#                                     sudo as normal).
+#   --apps=tier1,tier4                Restrict the apps stage to one or
+#                                     more comma-separated tiers (e.g.
+#                                     `--apps=tier1` or `--apps=tier1,tier4`).
+#                                     Empty (the default) installs every
+#                                     app matching the current profile.
+#                                     Honored from Phase B onward; in
+#                                     Phase A the flag is parsed but the
+#                                     install step is a stub.
 #   --no-wifi-takeover                After all other phases finish,
 #                                     `setup` checks whether wifi is
 #                                     `unmanaged` (Debian installer
@@ -441,6 +466,12 @@ BASE_PACKAGES=(
   # Pretty CLI — conky-all stays in common; it runs under Xwayland on
   # the plasma path via a kwin rule (see patch_conky_window_type).
   bat grc net-tools lm-sensors conky-all iproute2
+  # jq — required by every scripts/install-methods/*.sh adapter to
+  # parse the manifest JSON the dispatcher hands them.  Must land
+  # before the apps stage runs (stage 3 of 5) — that's why it's in
+  # BASE_PACKAGES alongside the other shell tools rather than tucked
+  # into a per-adapter check.
+  jq
   # Detection helpers
   pciutils dmidecode
   # Firmware updates via LVFS — `fwupdmgr refresh && fwupdmgr get-updates`
@@ -463,6 +494,7 @@ BASE_PACKAGES=(
   # X11 utilities — useful as diagnostics under Plasma too (xprop /
   # xwininfo work against Xwayland clients).
   x11-utils
+  python3-tomlkit  # for scripts/refresh-pins.sh format-preserving TOML edits
 )
 
 # DESKTOP_I3_PACKAGES — installed only when DESKTOP=i3 (default).
@@ -2005,27 +2037,107 @@ patch_conky_window_type() {
   #                         layers BELOW plasmashell's desktop wallpaper
   #                         layer, so conky's window disappears (process
   #                         keeps running — you see it in `ps` — but the
-  #                         window is buried).  The fix is to use
-  #                         'normal' (a managed window) and let KWin
-  #                         rules in config/plasma/kwinrulesrc force it
-  #                         below + skip-taskbar / skip-pager /
+  #                         window is buried) OR jumps to the FRONT when
+  #                         no KWin rule has classified it yet.  The fix
+  #                         is to use 'normal' (a managed window) and let
+  #                         KWin rules in config/plasma/kwinrulesrc force
+  #                         it below + skip-taskbar / skip-pager /
   #                         skip-switcher + no border + no focus.  See
   #                         the [conky-desktop-pin] section there for
   #                         the rule keys.
   #
-  # Single conky.conf in the repo → patched in place after deploy.
+  # Live-DE detection (NOT $DESKTOP):
+  #   $DESKTOP carries the value of --desktop= passed to this script,
+  #   which can drift from the session the user is actually running.
+  #   E.g. they ran setup with --desktop=i3 (the default), then logged
+  #   into Plasma — under the old logic, conky would be patched as
+  #   'override' (i3-correct) and pop to the front under KWin.
+  #
+  #   Detect the actual desktop right now via the same three signals
+  #   install-apps.sh's resolve_profile() uses: process check first
+  #   (most authoritative), then XDG_CURRENT_DESKTOP, then $DESKTOP
+  #   as last-resort fallback for non-interactive runs.
   local conf="${HOME}/.config/conky/conky.conf"
   [[ -f "$conf" ]] || return 0
-  case "$DESKTOP" in
+
+  local live_de=""
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -x plasmashell >/dev/null 2>&1; then
+      live_de="plasma"
+    elif pgrep -x i3 >/dev/null 2>&1; then
+      live_de="i3"
+    fi
+  fi
+  if [[ -z "$live_de" && -n "${XDG_CURRENT_DESKTOP:-}" ]]; then
+    case "${XDG_CURRENT_DESKTOP,,}" in
+      *kde*|*plasma*) live_de="plasma" ;;
+      *i3*)           live_de="i3" ;;
+    esac
+  fi
+  [[ -z "$live_de" ]] && live_de="$DESKTOP"
+
+  case "$live_de" in
     plasma)
       sed -i "s/own_window_type[[:space:]]*=[[:space:]]*'[^']*'/own_window_type    = 'normal'/" "$conf"
-      ok "conky own_window_type → normal (plasma; kwinrulesrc pins layer)"
+      ok "conky own_window_type → normal (live desktop: plasma; kwinrulesrc pins layer)"
+      # KWin caches rules at session start.  After the dotfiles deploy
+      # writes a new ~/.config/kwinrulesrc, KWin still has the OLD
+      # ruleset in memory — the conky-desktop-pin rule that forces
+      # conky `below=true` never triggers until next login.  Tell KWin
+      # to reread its config now via the same dbus method `systemsettings`
+      # uses.  Best-effort: silent failure if dbus is unavailable
+      # (e.g. running setup from an ssh session with no DBUS_SESSION_BUS_ADDRESS).
+      _conky_reload_kwin_rules
       ;;
     i3|*)
       sed -i "s/own_window_type[[:space:]]*=[[:space:]]*'[^']*'/own_window_type    = 'override'/" "$conf"
-      ok "conky own_window_type → override (i3)"
+      ok "conky own_window_type → override (live desktop: ${live_de:-unknown, defaulting i3})"
       ;;
   esac
+
+  # Restart any already-running conky so it picks up the new
+  # own_window_type AND the KWin rule classifies it on first map.
+  # Otherwise the window currently on screen keeps its pre-deploy type
+  # and stays at whatever stacking layer it was on — including front.
+  _conky_relaunch
+}
+
+# Tell KWin to re-read its rulesrc.  Three transports in fall-back order:
+#   1. kwriteconfig + qdbus reconfigure (Plasma 6 dbus method)
+#   2. dbus-send (no qdbus available — minimal Plasma installs)
+# Failure is non-fatal — the user can also log out and back in to
+# pick up the new rules.
+_conky_reload_kwin_rules() {
+  if command -v qdbus6 >/dev/null 2>&1; then
+    qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null && return 0
+  fi
+  if command -v qdbus >/dev/null 2>&1; then
+    qdbus org.kde.KWin /KWin reconfigure 2>/dev/null && return 0
+  fi
+  if command -v dbus-send >/dev/null 2>&1; then
+    dbus-send --session --type=method_call --dest=org.kde.KWin \
+      /KWin org.kde.KWin.reconfigure 2>/dev/null && return 0
+  fi
+  warn "could not reload KWin rules — log out and back in for conky-desktop-pin to take effect"
+  return 1
+}
+
+# Re-launch conky so any already-running instance picks up the patched
+# own_window_type + the freshly-loaded KWin rule.  Reuses the canonical
+# launch.sh which already does pkill-and-wait.
+_conky_relaunch() {
+  local launcher="${HOME}/.config/conky/launch.sh"
+  [[ -x "$launcher" ]] || return 0
+  # Setsid + nohup so the daemonised conky survives this setup process
+  # exiting.  DISPLAY check is inside the launcher; if we're in a TTY
+  # without an X/Wayland session it exits cleanly.
+  if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    setsid nohup "$launcher" >/dev/null 2>&1 < /dev/null &
+    disown 2>/dev/null || true
+    ok "conky relaunched (picks up patched config + new KWin rule)"
+  else
+    log "no display session — skipping conky relaunch (will start on next login)"
+  fi
 }
 
 # Substitute @HOME@ in a template and root-install the result to $dest.
@@ -3020,7 +3132,7 @@ declare -a VAL_CHECKS_PLASMA=(
   "dolphin|command -v dolphin"
   "kde-spectacle|command -v spectacle"
   "kwallet6|dpkg -l kwallet6 2>/dev/null | grep -q '^ii'"
-  "polkit-kde-agent-1|test -x /usr/bin/polkit-kde-authentication-agent-1 || test -x /usr/libexec/polkit-kde-authentication-agent-1"
+  "polkit-kde-agent-1|dpkg -l polkit-kde-agent-1 2>/dev/null | grep -q '^ii'"
   "pipewire-pulse|command -v pipewire-pulse"
   "wireplumber|command -v wireplumber"
   "wl-clipboard|command -v wl-copy"
@@ -3515,6 +3627,60 @@ unharden_phase() {
   ok "Hardening reverted (suitable for re-running setup)."
 }
 
+apps_install_phase() {
+  # Dispatches to scripts/apps-cli.sh — the single user-facing entry
+  # point for the application install lifecycle.  Validates the manifest
+  # first as a hard gate, then runs the actual installs (apt /
+  # apt-pinned-repo / github-release adapters, with per-app pre/post
+  # hooks for the browser policies generator and editor extension
+  # loops).
+  #
+  # Honored flags:
+  #   --no-apps         skip this entire stage (handled by setup orchestrator)
+  #   --apps=tier1,tier4 restrict the install set to specific tiers
+  #   --apps-dry-run    walk the install pipeline but install nothing
+  #                     (per-app DRY_RUN=1 to adapters, no system changes)
+
+  # Record the active desktop choice so install-apps.sh's resolve_profile
+  # can target manifests with machines = ["i3"] or ["plasma"] correctly.
+  # Per-user, survives reboot, no sudo required.
+  local state_dir="${HOME}/.config/dotfiles-state"
+  install -d -m 0755 "$state_dir"
+  printf '%s\n' "$DESKTOP" > "${state_dir}/desktop"
+
+  if (( ! APPS_DRY_RUN )); then
+    ensure_sudo
+  fi
+
+  log "validating config/apps/apps.toml…"
+  if ! "${SCRIPT_DIR}/scripts/apps-cli.sh" validate; then
+    err "apps validation failed — apps will NOT be installed"
+    err "fix config/apps/apps.toml and re-run, or pass --no-apps to skip"
+    return 1
+  fi
+
+  local -a install_args=(install)
+  if [[ -n "$APPS_TIER" ]]; then
+    install_args+=(--tier "$APPS_TIER")
+    log "apps tier filter: $APPS_TIER"
+  fi
+  if (( APPS_DRY_RUN )); then
+    install_args+=(--dry-run)
+    log "apps install: DRY-RUN (no system changes)"
+  else
+    log "apps install: real run (sudo cached for ${SUDO_KEEPALIVE_MINUTES:-90} min)"
+  fi
+
+  # Apps install failures are non-fatal for setup as a whole — the rest
+  # of the dotfiles (terminal stack, validate phase) should still run.
+  # The user sees the per-app summary line either way.
+  if ! "${SCRIPT_DIR}/scripts/apps-cli.sh" "${install_args[@]}"; then
+    warn "one or more app installs failed — see [install-apps] log above"
+    warn "the rest of setup will continue; re-run \`./scripts/apps-cli.sh install\` to retry"
+  fi
+  ok "apps stage complete"
+}
+
 validate_phase() {
   log "Running validation checks (desktop=${DESKTOP}) …"
   echo
@@ -3780,6 +3946,19 @@ This stage will:
   • Time: < 30 seconds
 EOF
       ;;
+    apps)
+      cat <<EOF
+This stage validates the application manifest at
+  config/apps/apps.toml
+and installs every app whose machines list intersects the current
+profile.  In Phase A install is a stub — the validation gate is real
+and refuses to proceed on broken manifests.
+
+What this stage does NOT do: identity setup.  SSH keys, git identity,
+GPG, Mullvad account, mail accounts, Signal pairing, Syncthing pairing,
+KeePassXC database — all manual after setup finishes.
+EOF
+      ;;
     terminal)
       cat <<EOF
 This stage will:
@@ -3821,6 +4000,7 @@ stage_title() {
   case "$1" in
     install)  echo "Install packages + drivers + VPN" ;;
     deploy)   echo "Deploy configuration files" ;;
+    apps)     echo "Validate + install applications" ;;
     terminal) echo "Set up terminal stack (zsh / nvim / starship)" ;;
     validate) echo "Run validation checks" ;;
   esac
@@ -3872,6 +4052,9 @@ WANT_CUDA=0
 WANT_STEAM=0
 WANT_NIX=1
 WANT_WIFI_TAKEOVER=1
+WANT_APPS=1     # 1 = run apps stage during setup (default-on); 0 = --no-apps opts out
+APPS_TIER=""   # empty = install all tiers; comma-list (e.g. "tier1,tier4") restricts
+APPS_DRY_RUN=0 # 1 = apps stage walks the pipeline without installing (--apps-dry-run)
 # Desktop stack selection.  Default is `i3` (the original cyberpunk
 # X11 stack — unchanged for existing users).  `plasma` switches the
 # install_phase + deploy_phase + validate_phase to KDE Plasma 6 on
@@ -3904,6 +4087,9 @@ while [[ $# -gt 0 ]]; do
     --cuda)       WANT_CUDA=1 ;;
     --steam)      WANT_STEAM=1 ;;
     --no-nix)     WANT_NIX=0 ;;
+    --no-apps)         WANT_APPS=0 ;;
+    --apps=*)          APPS_TIER="${1#--apps=}" ;;
+    --apps-dry-run)    APPS_DRY_RUN=1 ;;
     --no-wifi-takeover) WANT_WIFI_TAKEOVER=0 ;;
     --desktop=*)  DESKTOP="${1#--desktop=}" ;;
     --plasma)     DESKTOP="plasma" ;;
@@ -3987,14 +4173,19 @@ case "$ACTION" in
     fi
     ensure_sudo
 
-    run_stage 1 4 install  install_phase
-    run_stage 2 4 deploy   deploy_phase
-    run_stage 3 4 terminal terminal_phase
+    run_stage 1 5 install   install_phase
+    run_stage 2 5 deploy    deploy_phase
+    if [[ "$WANT_APPS" -eq 1 ]]; then
+      run_stage 3 5 apps    apps_install_phase
+    else
+      log "(apps skipped — --no-apps)"
+    fi
+    run_stage 4 5 terminal  terminal_phase
     # validate is read-only; failures shouldn't abort the pipeline (it's
     # the LAST stage anyway, so just report and move on).
-    run_stage 4 4 validate validate_phase || true
+    run_stage 5 5 validate  validate_phase || true
 
-    # Auto-wifi-takeover runs AFTER all four stages — by this point all
+    # Auto-wifi-takeover runs AFTER all stages — by this point all
     # apt downloads, git clones, oh-my-zsh fetch, nvim plugin sync, etc.
     # are done, so a brief network reconfiguration is safe.  Skipped
     # unless wifi is `unmanaged` AND creds are recoverable.  See

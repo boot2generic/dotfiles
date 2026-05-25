@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "gopass"
+install_method    = "direct-deb"
+installed_at      = "2026-05-25T01:48:17Z"
+installed_version = "1.16.1"
+installed_sha256  = "c96b0e10813598799f2154f22456501ec190f45eaa7fead7beba21f17993a514"
+install_path      = ""
+verified_by       = "sha256"
+manifest_pin_mode = "frozen"

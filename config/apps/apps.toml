@@ -1,0 +1,1126 @@
+# config/apps/apps.toml — single-file manifest of every third-party app
+# installed by this dotfiles repo.
+#
+# Schema version 2 (array-of-tables layout).  See:
+#   • config/apps/schema.toml          — field-by-field reference
+#   • config/apps/schema.example.toml  — worked examples covering every
+#                                        method + pin mode
+#   • config/apps/README.md            — workflow + lifecycle commands
+#
+# Ordering convention:
+#   Primary sort:  install.method group (apt → apt-pinned-repo →
+#                  github-release → direct-deb).
+#   Secondary:     alphabetical by `name` within each group.
+# Section header comments delimit groups.
+#
+# Pin modes:
+#   "track-latest" — apt (or other upstream channel) manages the version;
+#                    the manifest is metadata + last_refreshed annotation.
+#   "frozen"       — manifest carries the version + sha256.  Installer
+#                    refuses on hash mismatch.  REQUIRED for direct-deb;
+#                    recommended for github-release.
+#
+# Lockfile sidecars live at config/apps/.locks/<name>.lock — see README.md.
+
+schema_version = 2
+
+# ============================================================
+# method = "apt"
+# ============================================================
+
+[[apps]]
+# age — modern file encryption tool (X25519 + ChaCha20-Poly1305 + HKDF).
+# Designed as a simpler, foot-gun-free alternative to gpg for ad-hoc
+# encrypt/decrypt — no web of trust, no key servers, no metadata leakage
+# in armored output.  Pairs with the rage entry below (same wire format).
+#
+# Trust path: stock Debian apt — Debian release key signs the package
+# index.  No extra repo to pin; no extra fingerprint to manage.
+#
+# Pin mode: track-latest — apt manages the version via standard upgrades.
+# last_refreshed acts as the "we last looked at this" annotation.
+name         = "age"
+display_name = "age (file encryption)"
+tier         = 1
+machines     = ["common"]
+description  = "Modern file encryption (X25519 + ChaCha20-Poly1305); simpler than gpg for ad-hoc encrypt/decrypt."
+docs_url     = "https://age-encryption.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[[apps]]
+# gopass — Go reimplementation of pass.  Reads the same on-disk layout
+# (gpg-encrypted text files under ~/.password-store/) so it interoperates
+# with a pass-managed store.  Adds first-class git, team sharing, and
+# JSON output for scripting.
+#
+# Trust path: direct-deb from upstream GitHub Releases over HTTPS,
+# SHA-256-pinned in the manifest.  gopass is NOT packaged in Debian
+# trixie (removed in transition from bookworm; upstream redirects users
+# to their GitHub releases — see https://www.gopass.pw/#installation).
+# Upstream signs releases with their cosign key but the .deb itself is
+# only sha-anchored; trust comes from the manifest pin + HTTPS chain.
+#
+# Pin mode: frozen — direct-deb is frozen-only by contract.  Refresh
+# quarterly with `./scripts/apps-cli.sh refresh --app gopass` which
+# HEADs the pinned URL; when upstream cuts a new release, update the
+# url + sha256 + version below, then commit.
+name         = "gopass"
+display_name = "gopass (password manager)"
+tier         = 1
+machines     = ["common"]
+description  = "gpg-backed password manager; team-friendly extension of pass."
+docs_url     = "https://www.gopass.pw/"
+
+[apps.install]
+method = "direct-deb"
+
+[apps.install.direct_deb]
+url     = "https://github.com/gopasspw/gopass/releases/download/v1.16.1/gopass_1.16.1_linux_amd64.deb"
+sha256  = "c96b0e10813598799f2154f22456501ec190f45eaa7fead7beba21f17993a514"
+version = "1.16.1"
+
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[[apps]]
+# KeePassXC — local-only password database (.kdbx).  No cloud sync, no
+# network calls in the default config.  Pairs with the KeePassXC-Browser
+# WebExtension for autofill (we ship that integration OFF by default; flip
+# it on per-machine via the overlay).
+#
+# The deployed keepassxc.ini hardens the privacy posture (5-minute idle
+# auto-lock, lock-on-minimize, lock-on-session-lock, clipboard wipe,
+# updater off).  Argon2id KDF parameters live INSIDE each .kdbx file —
+# pick them at database-creation time; see _PROFILE.md for the recipe.
+#
+# Trust path: stock Debian apt.  Upstream signs releases with key
+# `BF5A669F2272CF4324EDFB64A1FEDD1ED0C7AA0D` but we let Debian's release
+# key be the trust root since we're consuming the .deb from main, not
+# upstream's apt repo.
+#
+# Pin mode: track-latest.
+name         = "keepassxc"
+display_name = "KeePassXC"
+tier         = 1
+machines     = ["common"]
+description  = "Local-only password database; pairs with the KeePassXC-Browser extension for autofill."
+docs_url     = "https://keepassxc.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[apps.configs]
+# overlay=true so a machine that DOES use the browser extension can flip
+# Browser/Enabled=true via ~/.config/dotfiles-local/keepassxc/keepassxc.ini
+# without diverging the repo copy.  Mode 0600 — the ini stores no secrets
+# itself but its referenced paths leak which databases exist.
+"${HOME}/.config/keepassxc/keepassxc.ini" = { source = "keepassxc.ini", mode = "0600", overlay = true }
+
+[[apps]]
+# libpam-yubico — PAM module that lets a YubiKey gate `login`, `sudo`,
+# `lightdm`, etc.  Installing the package does NOT enable PAM integration
+# — /etc/pam.d/ stays untouched.  The opt-in switch lives in the
+# `harden --yubikey` flow (see scripts/lib/harden.sh, future).  We ship
+# the package here so the binary's available when the user opts in; the
+# package itself is harmless idle.
+#
+# Trust path: stock Debian apt.  Upstream is Yubico's yubico-pam project;
+# their signed apt PPA exists but Debian main's libpam-yubico is current
+# enough that an extra pinned repo would be pure overhead.
+#
+# Pin mode: track-latest.
+name         = "libpam-yubico"
+display_name = "PAM YubiKey module"
+tier         = 1
+machines     = ["common"]
+description  = "PAM module for YubiKey auth. Opt-in only — installation does not enable PAM integration."
+docs_url     = "https://developers.yubico.com/yubico-pam/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[[apps]]
+# mosh — UDP-based remote shell that survives roaming (laptop sleep,
+# tether → wifi handoff) and lossy links.  Drop-in replacement for the
+# interactive SSH session; SSH still handles the initial auth handshake.
+#
+# Trust path: stock Debian apt.  Upstream signs source tarballs but the
+# Debian package is the canonical install on this OS.
+#
+# Pin mode: track-latest.
+name         = "mosh"
+display_name = "Mosh (mobile shell)"
+tier         = 1
+machines     = ["common"]
+description  = "UDP-based replacement for SSH; survives flaky links and roaming."
+docs_url     = "https://mosh.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[[apps]]
+# pass — the original Unix password manager.  Flat ~/.password-store/
+# tree of gpg-encrypted files, one secret per file.  Pairs with git for
+# sync (the user-driven `pass git push` flow, not auto-sync).
+#
+# This entry also deploys hardened gpg.conf + gpg-agent.conf — pass's
+# entire security posture is the underlying GnuPG config, so hardening
+# happens THERE rather than via a passrc that doesn't exist.  Both files
+# are overlay=false (intentional — we want every machine running the
+# same crypto policy); see config/apps/pass/_PROFILE.md for the rationale
+# and per-key explanations.
+#
+# Trust path: stock Debian apt.
+#
+# Pin mode: track-latest.
+name         = "pass"
+display_name = "pass (password-store)"
+tier         = 1
+machines     = ["common"]
+description  = "gpg-backed password store; pairs with git for sync."
+docs_url     = "https://www.passwordstore.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[apps.configs]
+# overlay=false — uniform crypto policy across every machine.  Mode 0600
+# matches GnuPG's own expectation for ~/.gnupg/* (the agent will warn or
+# refuse on world-readable config in some versions).
+"${HOME}/.gnupg/gpg.conf"       = { source = "gpg.conf",       mode = "0600", overlay = false }
+"${HOME}/.gnupg/gpg-agent.conf" = { source = "gpg-agent.conf", mode = "0600", overlay = false }
+
+[[apps]]
+# rage — Rust implementation of the age spec.  Same wire format as age
+# (entries are interchangeable); better Linux integration (proper
+# pinentry support for passphrase-protected identities, native stdout/
+# stderr conventions).  Ships side-by-side with age so the user can pick
+# whichever they have muscle memory for.
+#
+# Trust path: stock Debian apt.  Upstream cargo / GitHub release is GPG-
+# signed (str4d), but Debian main is sufficient at this tier.
+#
+# Pin mode: track-latest.
+name         = "rage"
+display_name = "rage (Rust age)"
+tier         = 1
+machines     = ["common"]
+description  = "Rust implementation of age; same wire format, better Linux integration."
+docs_url     = "https://github.com/str4d/rage"
+
+# Upstream ships `rage-musl_X.Y.Z-1_amd64.deb`; the .deb's `Package:`
+# field is `rage-musl` (statically linked against musl).  The
+# user-facing app name stays `rage` (meta.name); install.package
+# tells the dpkg short-circuit + remove path which package to query.
+[apps.install]
+method  = "direct-deb"
+package = "rage-musl"
+
+[apps.install.direct_deb]
+url     = "https://github.com/str4d/rage/releases/download/v0.11.2/rage-musl_0.11.2-1_amd64.deb"
+sha256  = "6cb7f11483dd516af11f556090a5228a6fe8853c25633de21096eeff486c1a88"
+version = "0.11.2"
+
+# Trust path: direct-deb from upstream GitHub Releases.  rage is NOT
+# packaged in Debian trixie (rage-musl exists in sid/experimental but
+# not stable).  The release IS GPG-signed by str4d but the .deb is
+# only sha-anchored in the manifest; HTTPS + sha256 is the trust chain.
+# Pin mode: frozen — direct-deb is frozen-only by contract.
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[[apps]]
+# yubikey-manager (`ykman`) — CLI for configuring YubiKey slots (OTP,
+# OATH, PIV, OpenPGP, FIDO).  Installing this package writes NO policy —
+# the user runs `ykman` interactively to provision keys.  Like the
+# libpam-yubico entry above, the PAM / system-side opt-in lives in
+# `harden --yubikey`; this package is the user-side toolkit.
+#
+# Trust path: stock Debian apt.  Yubico's PPA exists but Debian's
+# yubikey-manager is current.
+#
+# Pin mode: track-latest.
+name         = "yubikey-manager"
+display_name = "YubiKey Manager (ykman)"
+tier         = 1
+machines     = ["common"]
+description  = "CLI for YubiKey configuration. Install does not enable any policy — opt in via harden."
+docs_url     = "https://developers.yubico.com/yubikey-manager/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+
+[[apps]]
+# aerc — TUI mail client; modern, GPG-native, mbsync/notmuch-friendly.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "aerc"
+display_name = "aerc (TUI mail client)"
+tier         = 4
+machines     = ["common"]
+description  = "Modern terminal mail client; native GPG, mbsync/notmuch-friendly."
+docs_url     = "https://aerc-mail.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/aerc/aerc.conf"]
+source  = "aerc.conf"
+mode    = "0644"
+overlay = true
+
+
+[[apps]]
+# copyq — Clipboard manager with searchable history.  Ignores password
+# manager + pinentry windows so credentials never persist to history.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "copyq"
+display_name = "CopyQ (clipboard manager)"
+tier         = 4
+machines     = ["common"]
+description  = "Clipboard manager with history; configured to ignore password-manager paste contexts."
+docs_url     = "https://hluk.github.io/CopyQ/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/copyq/copyq.conf"]
+source  = "copyq.conf"
+mode    = "0600"
+overlay = true
+
+
+[[apps]]
+# firefox-esr — browser baseline.  LTS release; the policies.json deploys
+# the privacy-hardened baseline + force-installs uBlock Origin,
+# KeePassXC-Browser, Privacy Badger, ClearURLs, LocalCDN, and Multi-
+# Account Containers.  Generated from policies.json.base by the
+# pre_install hook before the [configs] deploy lands.
+# Trust path: stock Debian apt — Debian release key signs the package.
+# Pin mode: track-latest.
+name         = "firefox-esr"
+display_name = "Firefox ESR"
+tier         = 1
+machines     = ["common"]
+description  = "Browser baseline; LTS release with hardened telemetry/tracking policies and curated privacy add-ons."
+docs_url     = "https://www.mozilla.org/firefox/enterprise/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+# SYSTEM path — the deploy step requires sudo.  overlay=false: the
+# policies.json is fully regenerated by browser-policies-gen.py from
+# policies.json.base + the browser_extensions list below.  Per-machine
+# overrides go in ~/.config/dotfiles-local/apps.toml (extension list
+# can be overridden there).
+[apps.configs."/etc/firefox-esr/policies/policies.json"]
+source  = "policies.json"
+mode    = "0644"
+overlay = false
+
+[[apps.hooks.pre_install]]
+description = "regenerate firefox-esr policies.json from base + browser_extensions"
+command     = "{app_dir}/../../../scripts/lib/browser-policies-gen.py --app firefox-esr --root {app_dir}/../../.."
+
+[[apps.browser_extensions]]
+name        = "uBlock Origin"
+guid        = "uBlock0@raymondhill.net"
+amo_slug    = "ublock-origin"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "KeePassXC-Browser"
+guid        = "keepassxc-browser@keepassxc.org"
+amo_slug    = "keepassxc-browser"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "Privacy Badger"
+guid        = "jid1-MnnxcxisBPnSXQ@jetpack"
+amo_slug    = "privacy-badger17"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "ClearURLs"
+guid        = "{74145f27-f039-47ce-a470-a662b129930a}"
+amo_slug    = "clearurls"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "LocalCDN"
+guid        = "jid1-BoFifL9Vbdl2zQ@jetpack"
+amo_slug    = "localcdn-fork-of-decentraleyes"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "Multi-Account Containers"
+guid        = "@testpilot-containers"
+amo_slug    = "multi-account-containers"
+mode        = "force_installed"
+
+
+[[apps]]
+# flameshot — Screenshot tool with annotation; targets i3 only because
+# Plasma installs `spectacle` instead.  Cloud upload disabled by default.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "flameshot"
+display_name = "Flameshot (screenshot)"
+tier         = 4
+machines     = ["i3"]
+description  = "Screenshot tool with annotation; local-save only (no cloud upload by default)."
+docs_url     = "https://flameshot.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/flameshot/flameshot.ini"]
+source  = "flameshot.ini"
+mode    = "0644"
+overlay = true
+
+
+[[apps]]
+# libreoffice — Office suite meta-package.  Manual hardening required —
+# see config/apps/libreoffice/_PROFILE.md for the steps (telemetry off,
+# macros to High, Java disabled, online services removed).  The XML
+# config under /etc/libreoffice/registry/data/... is too gnarly to
+# template safely; we document the changes instead.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "libreoffice"
+display_name = "LibreOffice"
+tier         = 4
+machines     = ["common"]
+description  = "Office suite; manual privacy hardening required — see _PROFILE.md in config/apps/libreoffice/."
+docs_url     = "https://www.libreoffice.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+
+[[apps]]
+# mupdf — Minimal PDF viewer for i3.  Launch with `mupdf -X <file>` for
+# untrusted PDFs (disables JavaScript + form submission).  See
+# config/apps/mupdf/_PROFILE.md for the recommended invocation wrapper.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "mupdf"
+display_name = "MuPDF"
+tier         = 4
+machines     = ["i3"]
+description  = "Minimal PDF viewer; configured to launch with --no-js for safer untrusted PDFs."
+docs_url     = "https://mupdf.com/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+
+[[apps]]
+# okular — KDE PDF viewer (Plasma stack).  JavaScript-in-PDF disabled,
+# no remote-resource fetch.  Deployed alongside spectacle for the
+# screenshot side of the Plasma session.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "okular"
+display_name = "Okular (PDF viewer)"
+tier         = 4
+machines     = ["plasma"]
+description  = "KDE PDF viewer; JavaScript-in-PDF disabled, no remote-resource fetch."
+docs_url     = "https://okular.kde.org/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/okularpartrc"]
+source  = "okularpartrc"
+mode    = "0644"
+overlay = true
+
+
+[[apps]]
+# spectacle — KDE screenshot tool.  Local save only.  Plasma-only;
+# Flameshot handles the i3 side.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "spectacle"
+display_name = "Spectacle (screenshot)"
+tier         = 4
+machines     = ["plasma"]
+description  = "KDE screenshot tool; local save by default."
+docs_url     = "https://apps.kde.org/spectacle/"
+
+[apps.install]
+method  = "apt"
+package = "kde-spectacle"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+
+[[apps]]
+# thunderbird — Email + calendar + contacts + OpenPGP (native since 102).
+# Policies.json + autoconfig.cfg + lock-thunderbird.cfg ship via SYSTEM
+# paths (require sudo to deploy) and lock down telemetry, remote-image
+# loading, captive-portal probes, and the welcome wizard.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "thunderbird"
+display_name = "Thunderbird"
+tier         = 4
+machines     = ["common"]
+description  = "Email + calendar + contacts + OpenPGP; telemetry off, remote images off, autoconfig locked."
+docs_url     = "https://www.thunderbird.net/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+# Three SYSTEM-path config files.  All require sudo to deploy.
+#
+# DEPLOY-PATH CAVEAT: Mozilla's autoconfig.js MUST live under the
+# application's `defaults/pref/` directory to be processed by the
+# AutoConfig handler — otherwise the `general.config.filename` +
+# `general.config.obscure_value` prefs are set as user prefs and never
+# trigger the .cfg load (every `lockPref` becomes a no-op).  See Phase C
+# review #6.  After first install, run:
+#   dpkg -L thunderbird | grep -E 'defaults/pref|autoconfig'
+# to confirm the correct path on your Debian release.  Trixie's
+# thunderbird package ships defaults/pref under /usr/lib/thunderbird/.
+[apps.configs."/etc/thunderbird/policies/policies.json"]
+source  = "policies.json"
+mode    = "0644"
+overlay = false
+
+[apps.configs."/usr/lib/thunderbird/defaults/pref/autoconfig.js"]
+source  = "autoconfig.js"
+mode    = "0644"
+overlay = false
+
+[apps.configs."/usr/lib/thunderbird/lock-thunderbird.cfg"]
+source  = "lock-thunderbird.cfg"
+mode    = "0644"
+overlay = false
+
+
+[[apps]]
+# zathura — Minimal keyboard-driven PDF viewer for i3.  Set with strict
+# sandboxing.
+# Trust path: stock Debian apt.
+# Pin mode: track-latest.
+name         = "zathura"
+display_name = "Zathura (PDF viewer)"
+tier         = 4
+machines     = ["i3"]
+description  = "Minimal keyboard-driven PDF viewer; sandboxed (set sandbox strict)."
+docs_url     = "https://pwmt.org/projects/zathura/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/zathura/zathurarc"]
+source  = "zathurarc"
+mode    = "0644"
+overlay = true
+
+# ============================================================
+# method = "apt-pinned-repo"
+# ============================================================
+
+[[apps]]
+# Mullvad VPN — installed today by local_setup.sh:install_mullvad
+# (~L967-1053), which fetches https://repository.mullvad.net/deb/mullvad-keyring.asc,
+# enforces the pinned key fingerprint, writes a legacy one-line
+# /etc/apt/sources.list.d/mullvad.list, and runs `apt-get install mullvad-vpn`.
+#
+# This manifest is currently a descriptor only — local_setup.sh keeps
+# running unchanged in Phase A.  A future apt-pinned-repo adapter will
+# consume this entry and deploy the deb822-format .sources file shipped
+# at config/system/etc/apt/sources.list.d/mullvad.sources alongside the
+# tracked keyring blob at config/system/etc/apt/keyrings/mullvad-keyring.asc.
+#
+# Source of truth for key rotations:
+#   https://mullvad.net/en/help/install-mullvad-app-linux
+#
+# Pin mode: track-latest — apt manages versions via standard upgrades
+# once the source list is registered.  last_refreshed is preserved from
+# the Phase 0 migration as a "we last audited the key + repo" record.
+name         = "mullvad-vpn"
+display_name = "Mullvad VPN"
+tier         = 1
+machines     = ["common"]
+description  = "WireGuard/OpenVPN client + daemon from Mullvad's official apt repo (kept current via the standard apt upgrade flow once the source list is registered)."
+docs_url     = "https://mullvad.net/en/help/install-mullvad-app-linux"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "mullvad-vpn"
+suite_url       = "https://repository.mullvad.net/deb/stable"
+# $(distro_codename) → substituted with `lsb_release -cs` at install time
+# so one manifest serves trixie / bookworm / future Debian releases.
+suite           = "$(distro_codename)"
+components      = ["main"]
+key_url         = "https://repository.mullvad.net/deb/mullvad-keyring.asc"
+# Must stay in lockstep with MULLVAD_KEY_FINGERPRINT in local_setup.sh:964
+# until the dispatcher takes over the install.  Bump both in the same commit.
+key_fingerprint = "A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF"
+keyring_file    = "mullvad-keyring.asc"
+sources_file    = "mullvad.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-19"
+refresh_after_days = 90
+
+[[apps]]
+# Signal Desktop — Electron client for the Signal E2EE messenger.
+#
+# Trust path: Signal's official apt repo, pinned to the "xenial" suite.
+# That's not a typo — Signal publishes a single apt suite that they
+# label "xenial" across every distro they support, with no per-distro
+# split.  The deb822 sources file shipped at
+# config/system/etc/apt/sources.list.d/signal-desktop.sources reflects
+# that pin verbatim.
+#
+# Key fingerprint (DBA36B5181D0C816F630E889D980A17457F6FB06) lifted from
+# https://signal.org/download/ and cross-checked against the keys.asc
+# served at the repo root.  The tracked keyring at
+# config/system/etc/apt/keyrings/signal-desktop-keyring.asc is a Phase C
+# placeholder; the apt-pinned-repo adapter fetches the live key and
+# refuses on fingerprint mismatch.
+#
+# The deployed config.json disables hardware acceleration (avoids
+# Mesa/Nvidia driver glitches), disables the Chromium spellchecker (its
+# language packs download from a Google CDN), and forces all voice/video
+# calls through Signal's TURN relays (alwaysRelayCalls — hides the
+# user's IP from the call peer).  See config/apps/signal-desktop/_PROFILE.md
+# for the per-key rationale.
+#
+# Pin mode: track-latest — apt manages versions; last_refreshed = today.
+name         = "signal-desktop"
+display_name = "Signal Desktop"
+tier         = 1
+machines     = ["common"]
+description  = "E2EE messenger desktop client; pinned to Signal Foundation's signed apt repo."
+docs_url     = "https://signal.org/download/"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "signal-desktop"
+suite_url       = "https://updates.signal.org/desktop/apt"
+# Signal pins to the "xenial" suite across distros — that's intentional,
+# NOT a typo.  Signal's apt publisher doesn't track Debian codenames; the
+# single suite serves every release they support.
+suite           = "xenial"
+components      = ["main"]
+key_url         = "https://updates.signal.org/desktop/apt/keys.asc"
+# Lifted from https://signal.org/download/ on 2026-05-23.  The repo's
+# keys.asc must match this fingerprint or the adapter refuses to install.
+key_fingerprint = "DBA36B5181D0C816F630E889D980A17457F6FB06"
+keyring_file    = "signal-desktop-keyring.asc"
+sources_file    = "signal-desktop.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-23"
+refresh_after_days = 90
+
+[apps.configs]
+# overlay=true so a machine can layer per-machine prefs (theme, tray
+# behaviour, etc.) on top of the privacy defaults.
+# Mode 0600 — Signal Desktop persists its SQLCipher database key into
+# this same config.json after first launch.  World-readable would let
+# any local process running as another uid (or a user-scope package
+# under ~/.local) read the key off disk.  See Phase C security review.
+"${HOME}/.config/Signal/config.json" = { source = "config.json", mode = "0600", overlay = true }
+
+
+[[apps]]
+# mullvad-browser — Mullvad's privacy-focused Firefox fork.  Fingerprint-
+# resistant by design; does NOT bundle Tor.  Routes via clearnet / your
+# VPN (typically Mullvad VPN, installed earlier in this manifest).
+#
+# Shares the same apt-pinned-repo + GPG keyring as mullvad-vpn — the
+# adapter is idempotent on the keyring + sources_file deploy.  Only the
+# package name differs.
+#
+# Policies.json applies a TINY hardening layer on top of Mullvad's
+# default — locks update checks, telemetry, and the onboarding banner.
+# DOES NOT add the privacy add-ons that Firefox ESR gets: Mullvad
+# Browser's anonymity-set depends on every installed instance looking
+# identical, so we only force-install uBlock Origin + KeePassXC-Browser
+# (which Mullvad does NOT ship by default).
+#
+# Trust path: pinned 40-hex fingerprint, vendor apt repo.  Same key as
+# mullvad-vpn — see comment block on mullvad-vpn above.
+# Pin mode: track-latest.
+name         = "mullvad-browser"
+display_name = "Mullvad Browser"
+tier         = 1
+machines     = ["common"]
+description  = "Privacy-focused Firefox fork; fingerprint-resistant.  Does NOT bundle Tor."
+docs_url     = "https://mullvad.net/en/browser"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "mullvad-browser"
+suite_url       = "https://repository.mullvad.net/deb/stable"
+suite           = "$(distro_codename)"
+components      = ["main"]
+key_url         = "https://repository.mullvad.net/deb/mullvad-keyring.asc"
+key_fingerprint = "A1198702FC3E0A09A9AE5B75D5A1D4F266DE8DDF"
+keyring_file    = "mullvad-keyring.asc"
+sources_file    = "mullvad.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+# Same policies-gen hook as firefox-esr but smaller extension set
+# (uBlock + KeePassXC only) to preserve Mullvad's anonymity-set.
+#
+# DEPLOY-PATH CAVEAT: Mullvad Browser is a portable bundle that reads
+# policies from <install_dir>/distribution/policies.json.  Debian's
+# mullvad-browser package installs to /usr/lib/mullvad-browser/, so the
+# correct system path is /usr/lib/mullvad-browser/distribution/.
+# Verify after first install with `dpkg -L mullvad-browser | grep
+# distribution`; adjust this dest if upstream changes the layout.
+# /etc/mullvad-browser/ is an attempt at a Debian convention but Mullvad
+# Browser does NOT consult /etc/ for policies — see Phase C review #5.
+[apps.configs."/usr/lib/mullvad-browser/distribution/policies.json"]
+source  = "policies.json"
+mode    = "0644"
+overlay = false
+
+[[apps.hooks.pre_install]]
+description = "regenerate mullvad-browser policies.json from base + browser_extensions"
+command     = "{app_dir}/../../../scripts/lib/browser-policies-gen.py --app mullvad-browser --root {app_dir}/../../.."
+
+[[apps.browser_extensions]]
+name        = "uBlock Origin"
+guid        = "uBlock0@raymondhill.net"
+amo_slug    = "ublock-origin"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "KeePassXC-Browser"
+guid        = "keepassxc-browser@keepassxc.org"
+amo_slug    = "keepassxc-browser"
+mode        = "force_installed"
+
+
+[[apps]]
+# syncthing — Peer-to-peer encrypted file sync.  GUI bound to localhost
+# only (do NOT expose to LAN — SSH-tunnel for remote admin).  Usage
+# reporting explicitly declined in the post-install config patch.
+# Trust path: pinned 40-hex fingerprint (Syncthing release key).
+# Pin mode: track-latest — apt manages versions within the pinned repo.
+name         = "syncthing"
+display_name = "Syncthing"
+tier         = 4
+machines     = ["common"]
+description  = "Peer-to-peer encrypted file sync; no central server.  Bound to localhost by default."
+docs_url     = "https://syncthing.net/"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "syncthing"
+suite_url       = "https://apt.syncthing.net/"
+suite           = "syncthing"
+components      = ["stable"]
+key_url         = "https://syncthing.net/release-key.gpg"
+key_fingerprint = "FBA2E162F2F44657B38F0309E5665F9BD5970C47"
+keyring_file    = "syncthing-keyring.gpg"
+sources_file    = "syncthing.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+
+[[apps]]
+# vscodium — FLOSS rebuild of Microsoft VSCode.  Same Electron app with
+# the proprietary Microsoft branding, telemetry, and EULA-tied
+# marketplace stripped out.  Extensions resolve from Open VSX Registry
+# by default; Microsoft-proprietary ones (ms-python.*, ms-vscode-remote.*,
+# github.copilot-chat) don't transfer.
+#
+# settings.json was extracted from the user's installed MS VSCode
+# (~/.config/Code/User/settings.json) and layered with a telemetry-off /
+# auto-update-off / no-walkthrough block — see _PROFILE.md.
+#
+# extensions.txt is the Open VSX subset of the user's extension list
+# (7 of 24); see _PROFILE.md for the dropped MS-only extensions.
+#
+# Trust path: pinned 40-hex fingerprint (Pavlo Rudyi <paulcarroty@riseup.net>).
+# Pin mode: track-latest — apt manages versions within the pinned repo.
+name         = "vscodium"
+display_name = "VSCodium"
+tier         = 2
+machines     = ["common"]
+description  = "FLOSS rebuild of VSCode; no MS telemetry, Open-VSX-Registry-backed extensions."
+docs_url     = "https://vscodium.com/"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "codium"
+suite_url       = "https://paulcarroty.gitlab.io/vscodium-deb-rpm-repo/debs"
+suite           = "vscodium"
+components      = ["main"]
+key_url         = "https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg"
+key_fingerprint = "1302DE60231889FE1EBACADC54678CF75A278D9C"
+keyring_file    = "vscodium-keyring.gpg"
+sources_file    = "vscodium.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+# settings.json deploys to the per-user VSCodium config dir.  overlay=true
+# so a machine can layer per-host tweaks (workspace-local prefs, font
+# size) on top of the privacy defaults without diverging the repo.
+[apps.configs."${HOME}/.config/VSCodium/User/settings.json"]
+source  = "settings.json"
+mode    = "0644"
+overlay = true
+
+# Install the Open VSX extension set after VSCodium itself lands.
+# Reads extensions.txt (one extension id per line, '#' for comments,
+# blank lines OK) and calls `codium --install-extension` for each.
+# Idempotent — VSCodium skips already-installed extensions.
+[[apps.hooks.post_install]]
+description = "install Open VSX extensions listed in extensions.txt"
+command     = "while IFS= read -r ext; do [[ -z \"${ext}\" || \"${ext}\" == \\#* ]] && continue; codium --install-extension \"${ext}\" --force; done < {app_dir}/extensions.txt"
+
+
+[[apps]]
+# code (Microsoft VSCode) — OPT-IN, default DISABLED.
+#
+# The user has MS VSCode installed manually outside dotfiles.  The
+# previous design pick was VSCodium for the no-telemetry posture, BUT
+# the user's actual workflow relies on Microsoft-marketplace-only
+# extensions (ms-python.*, ms-toolsai.* Jupyter stack, ms-vscode-remote.*,
+# github.copilot-chat) that VSCodium can't install from Open VSX.
+#
+# This entry ships disabled.  To use:
+#   1. Edit this file, set `enabled = true` below.
+#   2. ./scripts/apps-cli.sh install --app code
+#
+# Trust path: pinned 40-hex Microsoft (Release signing) key fingerprint
+# (BC528686B50D79E339D3721CEB3E94ADBE1229CF) published at
+# https://packages.microsoft.com/keys/microsoft.asc.  The keyring + sources
+# files ship pre-built — see config/system/etc/apt/{keyrings,sources.list.d}/.
+#
+# Pin mode: track-latest — Microsoft pushes updates via the signed apt repo.
+name         = "code"
+display_name = "Visual Studio Code (Microsoft)"
+tier         = 2
+machines     = ["common"]
+enabled      = false
+description  = "Microsoft VSCode — proprietary, telemetry on by default (settings.json mitigates). Opt-in only; VSCodium is the dotfiles default."
+docs_url     = "https://code.visualstudio.com/"
+
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "code"
+suite_url       = "https://packages.microsoft.com/repos/code"
+suite           = "stable"
+components      = ["main"]
+key_url         = "https://packages.microsoft.com/keys/microsoft.asc"
+key_fingerprint = "BC528686B50D79E339D3721CEB3E94ADBE1229CF"
+keyring_file    = "microsoft-keyring.asc"
+sources_file    = "vscode.sources"
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+[apps.configs."${HOME}/.config/Code/User/settings.json"]
+source  = "settings.json"
+mode    = "0644"
+overlay = true
+
+[[apps.hooks.post_install]]
+description = "install MS marketplace extensions listed in extensions.txt"
+command     = "while IFS= read -r ext; do [[ -z \"${ext}\" || \"${ext}\" == \\#* ]] && continue; code --install-extension \"${ext}\" --force; done < {app_dir}/extensions.txt"
+
+
+# ============================================================
+# method = "github-release"
+# ============================================================
+
+[[apps]]
+# JetBrainsMono Nerd Font — installed today by
+# local_setup.sh:install_nerd_font (~L2394-2457), which downloads
+# JetBrainsMono.zip from ryanoasis/nerd-fonts v3.3.0, fetches the
+# SHA-256.txt manifest, verifies via `sha256sum -c`, and extracts the
+# *NerdFont*.ttf files to ~/.local/share/fonts/NerdFonts/ before
+# running `fc-cache -f`.
+#
+# This manifest is a descriptor only in Phase A; local_setup.sh keeps
+# running unchanged.  Schema choices preserved from Phase 0:
+#   • asset_pattern = "JetBrainsMono.zip" — the font archive is
+#     architecture-independent (TTF files), so no {arch} substitution.
+#     We mirror legacy code's choice of the .zip variant (NOT .tar.xz).
+#   • install_to is the system-wide fontconfig path; the legacy path
+#     under ~/.local/share/fonts/NerdFonts is equally valid for
+#     fontconfig and a future adapter may override.
+#   • extract_path = "" — the github-release adapter unpacks the whole
+#     tree (no single binary to pull from a nested path).
+#   • Nerd Fonts releases are NOT GPG-signed; sidecar SHA-256 is the
+#     only tamper signal.
+#
+# Pin mode: frozen — v3.3.0 sha pulled from upstream SHA-256.txt on
+# 2026-05-19 (matches what install_nerd_font would verify on a fresh
+# run today).  Fonts rarely bump; verify-pins.sh flags staleness only
+# if upstream cuts a new release between manual refreshes.
+name         = "jetbrains-mono-nerd"
+display_name = "JetBrainsMono Nerd Font"
+tier         = 2
+machines     = ["common"]
+description  = "Nerd-Font-patched JetBrainsMono — supplies PUA glyphs used by i3 / polybar / alacritty / rofi for icon rendering."
+docs_url     = "https://github.com/ryanoasis/nerd-fonts"
+
+[apps.install]
+method = "github-release"
+
+[apps.install.github_release]
+repo            = "ryanoasis/nerd-fonts"
+asset_pattern   = "JetBrainsMono.zip"
+install_to      = "/usr/local/share/fonts/JetBrainsMono"
+version         = "v3.3.0"
+sha256_x86_64   = "2d83782a350b604bfa70fce880604a41a7f77c3eec8f922f9cdc3c20952ddbe4"
+# Same archive on every architecture — populate both so verify-pins
+# doesn't flag arm64 as missing.
+sha256_aarch64  = "2d83782a350b604bfa70fce880604a41a7f77c3eec8f922f9cdc3c20952ddbe4"
+gpg_fingerprint = ""
+extract_path    = ""
+
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-19"
+refresh_after_days = 90
+
+[[apps]]
+# Starship prompt — currently installed by three legacy paths, none of
+# which Phase A modifies:
+#   1. scripts/build-bundle.sh:174-195 — online refresh; downloads
+#      starship-${arch}-unknown-linux-gnu.tar.gz + .sha256 sidecar and
+#      drops both into bundle/starship/ for offline install.
+#   2. scripts/install-shell.sh:~290-300 — offline-bundle install;
+#      re-verifies the bundled tarball against its sha256 sidecar.
+#   3. scripts/lib/install-common.sh:118-148 (common_install_starship)
+#      — fallback `curl … | sh -s -- --yes` against starship.rs/install.sh
+#      when no apt/dnf package is available.
+#
+# This manifest is a descriptor only in Phase A.  Values pulled from:
+#   • build-bundle.sh's asset-name template (lines 176-181)
+#   • Upstream release v1.25.1 (github.com/starship/starship/releases/tag/v1.25.1)
+#   • Sidecar .sha256 files on the GitHub release CDN
+#
+# Caveats:
+#   • Upstream does NOT publish starship-aarch64-unknown-linux-gnu.tar.gz
+#     (only the musl variant).  build-bundle.sh references the gnu name
+#     verbatim for aarch64 and would 404 on an arm64 build box; we
+#     capture the gnu pattern here to mirror the legacy contract.
+#     Adapters wanting real arm64 support should swap asset_pattern to
+#     `…-unknown-linux-musl.tar.gz`.
+#   • Starship does NOT GPG-sign releases — sidecar SHA-256 is the
+#     only tamper signal.  Leave gpg_fingerprint = "".
+#
+# Pin mode: frozen — v1.25.1 + sha256_x86_64 verified 2026-05-19.
+# sha256_aarch64 is the empty string by design (see caveat).
+name         = "starship"
+display_name = "Starship prompt"
+tier         = 2
+machines     = ["common"]
+description  = "Cross-shell prompt; replaces the default zsh PS1 with a fast Rust prompt."
+docs_url     = "https://starship.rs/"
+
+[apps.install]
+method = "github-release"
+
+[apps.install.github_release]
+repo            = "starship/starship"
+# {arch} → "x86_64" / "aarch64" (no {version} substitution — version
+# lives below).  Mirror of the legacy build-bundle.sh template.
+asset_pattern   = "starship-{arch}-unknown-linux-gnu.tar.gz"
+install_to      = "/usr/local/bin/starship"
+version         = "v1.25.1"
+sha256_x86_64   = "4488c11ca632327d1f1f16fb2f102c0646094c35479cd5435991385da43c61ac"
+# Empty — the gnu asset doesn't exist for aarch64 (see caveat above).
+sha256_aarch64  = ""
+gpg_fingerprint = ""
+# Tarball is flat — the binary sits at the root with no version-named
+# subdirectory.
+extract_path    = "starship"
+
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-19"
+refresh_after_days = 30
+
+
+[[apps]]
+# obsidian — Markdown notes / knowledge-graph editor.  Stores vaults as
+# plain folders of `.md` files (no proprietary format), so Syncthing
+# the vault path syncs notes between machines transparently.  Backlinks
+# + graph view + Dataview make it strong for research workflows.
+#
+# Distributed as AppImage on GitHub at obsidianmd/obsidian-releases.
+# Released asset name uses the bare version (`Obsidian-1.12.7.AppImage`)
+# while the tag is `v1.12.7` — the {version_no_v} placeholder strips
+# the leading v.
+#
+# Proprietary (closed-source binary) — included despite the previous
+# FLOSS lean because:
+#   • Storage format is open (plain .md files), so no lock-in.
+#   • Built-in Restricted Mode blocks third-party plugins by default;
+#     enable only the ones you audit.
+#   • Per-vault config — no SYSTEM-path deploy needed; the
+#     config/apps/obsidian/recommended-vault-template/ folder ships an
+#     opinionated .obsidian/ that the user copies into a fresh vault.
+#
+# SUPPLY-CHAIN NOTE: Obsidian does NOT GPG-sign its releases.  In
+# track-latest mode the only integrity check is HTTPS-to-GitHub, which
+# a malicious GitHub-account compromise of obsidianmd could defeat
+# silently.  Recommended workflow:
+#   1. Install once with track-latest.
+#   2. `./scripts/apps-cli.sh freeze --app obsidian` to lock the install
+#      to the verified version + sha.
+#   3. Run `apps refresh --app obsidian` quarterly and review the diff
+#      before re-freezing.
+# Trust path: HTTPS to GitHub Releases (no signature) + manifest pin
+# (when frozen).
+name         = "obsidian"
+display_name = "Obsidian (markdown knowledge graph)"
+tier         = 4
+machines     = ["common"]
+description  = "Markdown knowledge-graph editor; plain-file vaults pair cleanly with Syncthing for cross-machine sync."
+docs_url     = "https://obsidian.md/"
+
+[apps.install]
+method = "github-release"
+
+[apps.install.github_release]
+repo            = "obsidianmd/obsidian-releases"
+# Asset names use the bare version (no `v` prefix) while tags use `v`;
+# {version_no_v} strips it.  Live example for v1.12.7:
+#   Obsidian-1.12.7.AppImage
+asset_pattern   = "Obsidian-{version_no_v}.AppImage"
+install_to      = "/usr/local/bin/obsidian.AppImage"
+gpg_fingerprint = ""
+extract_path    = ""
+
+[apps.pin]
+mode               = "track-latest"
+last_refreshed     = "2026-05-24"
+refresh_after_days = 90
+
+# Post-install: drop a `obsidian` shim so the user can run the editor
+# without typing the .AppImage suffix (matches the launcher names in
+# kde-launcher / rofi). Mirrors the post_install pattern used by
+# vscodium / code for extension-loader scripts.
+[[apps.hooks.post_install]]
+description = "symlink /usr/local/bin/obsidian → obsidian.AppImage + chmod +x AppImage"
+command     = "sudo chmod +x /usr/local/bin/obsidian.AppImage && sudo ln -sf /usr/local/bin/obsidian.AppImage /usr/local/bin/obsidian"

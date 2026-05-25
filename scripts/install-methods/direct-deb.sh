@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/install-methods/direct-deb.sh
 #
-# Phase 0 install-method adapter: fetch a pinned .deb URL, verify
-# SHA-256, dpkg-install, fix-broken if dpkg leaves unsatisfied deps.
+# Install-method adapter: fetch a pinned .deb URL, verify SHA-256,
+# dpkg-install, fix-broken if dpkg leaves unsatisfied deps.
 #
 # Why a separate method from apt-pinned-repo: some upstreams (e.g.
 # 1Password CLI, Slack, certain VPN clients) publish a .deb directly
@@ -10,7 +10,15 @@
 # upgrade story for a single pinned URL is acceptable when the
 # version cadence is slow and the SHA is pinned by us.
 #
-# Invocation contract: see scripts/install-methods/apt.sh.
+# Pin-mode handling: direct-deb is FROZEN-ONLY by contract (the schema
+# validator enforces this — track-latest would have no upstream to
+# query without a release feed).  The lockfile records pin_mode =
+# "frozen" unconditionally.
+#
+# Invocation contract: see scripts/install-methods/apt.sh.  LOCKFILE_PATH
+# is honored same as the other adapters; the lockfile records the
+# manifest version + sha256, plus verified_by = "sha256".
+#
 # Manifest fields under .install.direct_deb:
 #   url, sha256, version.
 # Optional: .install.package (else fall back to .meta.name) — used
@@ -61,6 +69,7 @@ done
 : "${DRY_RUN:=0}"
 : "${REPO_DIR:=}"
 : "${DOTFILES_MACHINE:=}"
+: "${LOCKFILE_PATH:=}"
 
 get() { jq -r "$1 // empty" "$manifest_json"; }
 
@@ -69,6 +78,11 @@ expected_sha="$(get '.install.direct_deb.sha256')"
 version="$(get '.install.direct_deb.version')"
 package="$(get '.install.package')"
 [[ -z "$package" ]] && package="$(get '.meta.name')"
+
+# Lockfile NAME tracks the manifest's meta.name so apps-cli.sh can find
+# the .lock by app key (which may differ from the .deb's Package field).
+app_name="$(get '.meta.name')"
+[[ -z "$app_name" ]] && app_name="$package"
 
 for f in url expected_sha version package; do
     if [[ -z "${!f}" ]]; then
@@ -97,6 +111,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
     log "would verify sha256: $expected_sha"
     log "would: sudo dpkg -i <downloaded.deb>"
     log "would: sudo apt-get install -y --fix-broken (if dpkg reports deps)"
+    [[ -n "$LOCKFILE_PATH" ]] && log "[direct-deb] would write lockfile at $LOCKFILE_PATH"
     emit "installed=false skipped_reason=dry-run"
     exit 0
 fi
@@ -137,25 +152,51 @@ ok "sha256 verified"
 # the package in "iU" (unpacked, deps unmet) state, which fix-broken
 # recognises.
 log "dpkg -i $deb_file"
+installed_ok=0
 if sudo dpkg -i "$deb_file" >&2; then
     ok "$package installed via dpkg"
-    emit "installed=true"
-    exit 0
-fi
-
-# dpkg -i failed — most likely dependency problem.  Try fix-broken
-# exactly once (not in a loop — repeated failure indicates something
-# else and we'd rather surface that than spin).
-warn "dpkg reported issues — running apt-get install --fix-broken"
-if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken >&2; then
-    # Re-check: did fix-broken leave the package configured?
-    if dpkg -s "$package" 2>/dev/null | grep -q '^Status: install ok installed'; then
-        ok "$package installed (after fix-broken)"
-        emit "installed=true"
-        exit 0
+    installed_ok=1
+else
+    # dpkg -i failed — most likely dependency problem.  Try fix-broken
+    # exactly once (not in a loop — repeated failure indicates something
+    # else and we'd rather surface that than spin).
+    warn "dpkg reported issues — running apt-get install --fix-broken"
+    if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken >&2; then
+        # Re-check: did fix-broken leave the package configured?
+        if dpkg -s "$package" 2>/dev/null | grep -q '^Status: install ok installed'; then
+            ok "$package installed (after fix-broken)"
+            installed_ok=1
+        fi
     fi
 fi
 
-err "dpkg + fix-broken both failed for $package"
-emit "installed=false skipped_reason=dpkg-error"
-exit 2
+if (( ! installed_ok )); then
+    err "dpkg + fix-broken both failed for $package"
+    emit "installed=false skipped_reason=dpkg-error"
+    exit 2
+fi
+
+# ── Lockfile write ────────────────────────────────────────────────
+# direct-deb is frozen-by-contract; record the manifest version + sha
+# verbatim (these were just verified pre-install).  install_path is
+# empty: a .deb installs to system locations dpkg controls, not a
+# single repo-tracked path.
+if [[ -n "$LOCKFILE_PATH" ]]; then
+    # shellcheck source=../lib/lockfile.sh
+    if ! source "${REPO_DIR}/scripts/lib/lockfile.sh"; then
+        warn "could not source lockfile.sh — install succeeded but lockfile NOT written"
+    elif ! lockfile_write \
+            --path         "$LOCKFILE_PATH" \
+            --name         "$app_name" \
+            --method       "direct-deb" \
+            --version      "$version" \
+            --sha256       "$expected_sha" \
+            --install-path "" \
+            --verified-by  "sha256" \
+            --pin-mode     "frozen"; then
+        warn "lockfile_write failed — install succeeded but lockfile NOT written"
+    fi
+fi
+
+emit "installed=true"
+exit 0

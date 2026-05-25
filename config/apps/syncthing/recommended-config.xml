@@ -1,0 +1,36 @@
+<!--
+  Phase C — recommended Syncthing config snippet.
+
+  Syncthing generates ~/.config/syncthing/config.xml on first run with
+  default settings.  This snippet documents the privacy-relevant
+  overrides we recommend, but does NOT auto-apply them — Syncthing's
+  config schema is too involved to safely merge programmatically in
+  Phase C.
+
+  After first launch:
+
+    1. Stop syncthing:
+         systemctl --user stop syncthing
+
+    2. Edit ~/.config/syncthing/config.xml and apply these settings:
+
+         <options>
+           <urAccepted>-1</urAccepted>             <!-- usage reporting explicitly declined -->
+           <crashReportingEnabled>false</crashReportingEnabled>
+           <natEnabled>true</natEnabled>
+           <localAnnounceEnabled>true</localAnnounceEnabled>
+           <globalAnnounceEnabled>true</globalAnnounceEnabled>   <!-- keep true to discover peers behind NAT -->
+           <relaysEnabled>true</relaysEnabled>      <!-- keep true for NAT'd peers; set false for LAN-only -->
+         </options>
+
+         <gui enabled="true" tls="true">
+           <address>127.0.0.1:8384</address>        <!-- bind to localhost only — do NOT expose to LAN -->
+           <theme>dark</theme>
+         </gui>
+
+    3. Restart:
+         systemctl --user start syncthing
+
+  Programmatic merge of these settings is Phase D work (refresh
+  config.xml on every setup run, idempotent).
+-->

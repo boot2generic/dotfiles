@@ -1,0 +1,28 @@
+# VSCodium extensions — one per line, installed via `codium --install-extension <id>`
+# in the [[apps.hooks.post_install]] of the vscodium entry.
+#
+# This list is the Open-VSX-Registry-available SUBSET of the user's
+# original MS VSCode extension set.  Microsoft-proprietary extensions
+# (ms-python.*, ms-toolsai.*, ms-vscode-remote.*, github.copilot-chat,
+# ms-vscode.cpptools) are intentionally NOT included — they're not
+# published to Open VSX by Microsoft.  If you need them, install MS
+# VSCode separately (the `code` entry in apps.toml ships disabled by
+# default; flip enabled = true and re-run apps install).
+#
+# Lines beginning with '#' are comments and ignored.
+# Empty lines are ignored.
+
+# Linting / formatting
+charliermarsh.ruff
+davidanson.vscode-markdownlint
+
+# Languages / data
+redhat.vscode-yaml
+
+# GitHub workflow
+github.vscode-github-actions
+
+# Themes / icons
+dracula-theme.theme-dracula
+pkief.material-icon-theme
+vscode-icons-team.vscode-icons

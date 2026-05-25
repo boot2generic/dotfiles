@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/install-methods/apt-pinned-repo.sh
 #
-# Phase 0 install-method adapter: install a package from a pinned
-# third-party apt repo (e.g. Docker, Tailscale, signal-desktop).
+# Install-method adapter: install a package from a pinned third-party
+# apt repo (e.g. Mullvad, Docker, Tailscale, signal-desktop).
 #
 # Why this exists separate from apt.sh: third-party repos require a
 # pinned signing key AND a sources.list entry, and the right answer
@@ -15,9 +15,14 @@
 #      bad key error doesn't poison the whole apt cache.
 #   4. apt-get install -y --no-install-recommends <package>.
 #
+# Pin-mode handling: like plain apt, this method always lets apt manage
+# version selection inside the pinned repo.  pin.mode is informational
+# in the lockfile only.
+#
 # Invocation contract — see scripts/install-methods/apt.sh for the
-# shared adapter spec; only the .install.apt_pinned_repo.* fields
-# differ.
+# shared adapter spec.  LOCKFILE_PATH is honored same as apt.sh; the
+# lockfile records the dpkg-queried version + the pinned fingerprint
+# under verified_by ("gpg-keyring:<fpr>").
 #
 # Files read from the repo:
 #   $REPO_DIR/config/system/etc/apt/keyrings/<keyring_file>
@@ -55,6 +60,7 @@ fi
 : "${DRY_RUN:=0}"
 : "${REPO_DIR:?REPO_DIR env var must be set to the dotfiles repo root}"
 : "${DOTFILES_MACHINE:=}"
+: "${LOCKFILE_PATH:=}"
 
 # Resolve a single jq path with a friendly error message on missing key.
 get() {
@@ -67,6 +73,13 @@ package="$(get '.install.apt_pinned_repo.package')"
 key_fingerprint="$(get '.install.apt_pinned_repo.key_fingerprint')"
 keyring_file="$(get '.install.apt_pinned_repo.keyring_file')"
 sources_file="$(get '.install.apt_pinned_repo.sources_file')"
+app_name="$(get '.meta.name')"
+[[ -z "$app_name" ]] && app_name="$package"
+
+# pin.mode — informational only for this method (apt manages versions
+# within the pinned repo).  Recorded verbatim in the lockfile.
+pin_mode="$(get '.pin.mode')"
+[[ -z "$pin_mode" ]] && pin_mode="track-latest"
 
 # All four are required.  suite_url/suite/components/key_url are
 # *documented* in the manifest for human auditors but only the
@@ -145,6 +158,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
     log "would install sources → /etc/apt/sources.list.d/$sources_file"
     log "would: sudo apt-get update (this source only)"
     log "would: sudo apt-get install -y --no-install-recommends $package"
+    [[ -n "$LOCKFILE_PATH" ]] && log "[apt-pinned-repo] would write lockfile at $LOCKFILE_PATH"
     emit "installed=false skipped_reason=dry-run"
     exit 0
 fi
@@ -190,13 +204,36 @@ fi
 ok "repo index refreshed"
 
 log "apt-get install $package …"
-if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
         --no-install-recommends "$package" >&2; then
-    ok "$package installed from pinned repo"
-    emit "installed=true"
-    exit 0
-else
     err "apt-get install $package failed (after successful repo refresh)"
     emit "installed=false skipped_reason=apt-error"
     exit 2
 fi
+ok "$package installed from pinned repo"
+
+# ── Lockfile write ────────────────────────────────────────────────
+# verified_by = "gpg-keyring:<fpr>" — the keyring fingerprint we
+# already verified above is the trust anchor for this method.
+# installed_version comes from dpkg-query post-install (apt may have
+# pulled a newer version than whatever the manifest last "audited").
+if [[ -n "$LOCKFILE_PATH" ]]; then
+    installed_version="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
+    # shellcheck source=../lib/lockfile.sh
+    if ! source "${REPO_DIR}/scripts/lib/lockfile.sh"; then
+        warn "could not source lockfile.sh — install succeeded but lockfile NOT written"
+    elif ! lockfile_write \
+            --path         "$LOCKFILE_PATH" \
+            --name         "$app_name" \
+            --method       "apt-pinned-repo" \
+            --version      "$installed_version" \
+            --sha256       "" \
+            --install-path "" \
+            --verified-by  "gpg-keyring:${actual_fpr_norm}" \
+            --pin-mode     "$pin_mode"; then
+        warn "lockfile_write failed — install succeeded but lockfile NOT written"
+    fi
+fi
+
+emit "installed=true"
+exit 0

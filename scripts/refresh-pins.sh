@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # scripts/refresh-pins.sh
 #
-# Pull upstream metadata for every config/apps/<name>.toml pin, verify
-# what we can, and rewrite the pin's `last_refreshed` (and SHA/version
-# for github-release) back into the TOML in place.  NEVER commits.
-# NEVER auto-prompts.  Designed to be cron-driven; --quiet exists so a
-# successful run produces zero output.
+# Pull upstream metadata for every [[apps]] pin under config/apps/,
+# verify what we can, and rewrite each pin's `last_refreshed` (and
+# SHA/version for github-release frozen mode) back into the TOML in
+# place.  NEVER commits.  NEVER auto-prompts.  Designed to be
+# cron-driven; --quiet exists so a successful run produces zero output.
+#
+# Discovery is identical to install-apps.sh / verify-pins.sh: walk
+# every .toml under config/apps/ that contains a top-level [[apps]]
+# array (skipping schema*.toml, _*.toml, .*.toml).  Files without
+# [[apps]] are silently skipped — that's the slot the legacy per-file
+# manifests still occupy during the schema-v1 → schema-v2 transition.
 #
 # Per-method semantics:
 #   apt              skipped — no pin to refresh.
@@ -18,26 +24,38 @@
 #                    bump the date (the next run will keep flagging
 #                    until refresh-keys.sh is run by a human).
 #   github-release   GET https://api.github.com/repos/<repo>/releases/latest
-#                    Compare tag_name to pin.version:
-#                      same  → bump last_refreshed only.
-#                      diff  → download new asset(s) to mktemp, sha256
-#                              both arch tarballs we have a slot for,
-#                              GPG-verify if pin.gpg_fingerprint is set,
-#                              then rewrite version + sha256_* + date.
-#                    Note: GitHub rate-limits unauth'd API to 60/hr/IP;
-#                    --all on a box with many github-release apps may
-#                    exhaust that.  Sleep between calls is intentional.
-#   direct-deb       DEGENERATE in Phase 0.  We have no discovery URL
-#                    pattern — vendor sites differ wildly — so we just
-#                    HEAD the pinned URL and bump last_refreshed if it
-#                    returns 2xx.  This catches "vendor moved the
-#                    download" but NOT "vendor cut a new version" —
-#                    that requires manual editing of the .toml.
+#                    pin.mode behaviour:
+#                      track-latest → always bump last_refreshed.
+#                      frozen + tag == version → bump last_refreshed only.
+#                      frozen + tag != version → REFUSE to auto-rewrite.
+#                          Print a clear message saying the equivalent
+#                          track-latest mode would auto-bump but frozen
+#                          requires manual review (with the new tag).
+#   direct-deb       HEAD the pinned URL.  If 2xx, bump last_refreshed
+#                    (the URL is alive).  Non-2xx is an error — don't
+#                    bump.  We can't re-derive sha/version without
+#                    re-downloading; manual editing required for that.
 #
-# Why no auto-commit: refreshing a SHA after a real upstream version
-# bump should be reviewed by a human (release notes, breaking-changes
-# scan).  This script intentionally stops at the TOML edit so the
-# user sees a clean `git diff` before committing.
+# Why we no longer auto-rewrite SHAs on a frozen tag bump:
+#   Refreshing a SHA after a real upstream version bump should be
+#   reviewed by a human (release notes, breaking-changes scan).  This
+#   script intentionally stops at the date-bump step so the user sees
+#   a clean `git diff` before committing.  track-latest mode signals
+#   "I want this to follow upstream"; frozen mode signals "I've
+#   audited this exact version".  We honour both.
+#
+# pin.mode behaviour summary:
+#   "track-latest"   bump last_refreshed unconditionally (after the
+#                    upstream-liveness probe succeeds).
+#   "frozen"         bump last_refreshed if upstream still matches the
+#                    pinned version; refuse to mutate the pinned
+#                    version/sha automatically.
+#
+# Writing back to apps.toml requires comment/format preservation —
+# the file ships hand-curated section headers and per-entry comments.
+# We use python3-tomlkit for round-tripping.  If tomlkit is not
+# importable we abort with a clear install hint rather than fall back
+# to a naive str-replace that would corrupt the file.
 #
 # Usage:
 #   ./scripts/refresh-pins.sh                       # all apps
@@ -69,24 +87,69 @@ APPS_DIR="${REPO_DIR}/config/apps"
 KEYRINGS_DIR="${REPO_DIR}/config/system/etc/apt/keyrings"
 SOURCES_DIR="${REPO_DIR}/config/system/etc/apt/sources.list.d"
 
+VALIDATOR="${SCRIPT_DIR}/apps-validate.py"
+
 DRY_RUN=0
 ONLY_APP=""
 ONLY_METHOD=""
+NO_VALIDATE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --all)        ;;
-        --app)        ONLY_APP="${2:-}";    [[ -z "$ONLY_APP" ]]    && die "--app requires a name"; shift ;;
-        --method)     ONLY_METHOD="${2:-}"; [[ -z "$ONLY_METHOD" ]] && die "--method requires a value"; shift ;;
-        --dry-run)    DRY_RUN=1 ;;
-        --quiet)      QUIET=1 ;;
-        -h|--help)    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *)            die "Unknown flag: $1 (try --help)" ;;
+        --all)         ;;
+        --app)         ONLY_APP="${2:-}";    [[ -z "$ONLY_APP" ]]    && die "--app requires a name"; shift ;;
+        --method)      ONLY_METHOD="${2:-}"; [[ -z "$ONLY_METHOD" ]] && die "--method requires a value"; shift ;;
+        --dry-run)     DRY_RUN=1 ;;
+        --quiet)       QUIET=1 ;;
+        --no-validate) NO_VALIDATE=1 ;;
+        -h|--help)     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)             die "Unknown flag: $1 (try --help)" ;;
     esac
     shift
 done
 
 command -v python3 >/dev/null 2>&1 || die "python3 missing"
 command -v curl    >/dev/null 2>&1 || warn "curl missing — github-release / direct-deb refresh will fail"
+command -v gpg     >/dev/null 2>&1 || warn "gpg missing — apt-pinned-repo fingerprint checks will fail"
+
+# ── Pre-flight validator gate ──────────────────────────────────────
+# Mirrors install-apps.sh / verify-pins.sh; refuse to refresh a
+# manifest the schema validator rejects.  See scripts/lib/validator-gate.sh.
+# shellcheck source=lib/validator-gate.sh
+source "${SCRIPT_DIR}/lib/validator-gate.sh"
+if ! run_apps_validator "$VALIDATOR" "$REPO_DIR" "$NO_VALIDATE"; then
+    exit 1
+fi
+
+# ── Shared GPG helpers ─────────────────────────────────────────────
+# fingerprint_of() is identical to verify-pins.sh's; sourcing the lib
+# keeps the trust model consistent — if the two ever drift, an attacker
+# who edits the repo could land a "passes-refresh, fails-verify" state.
+# shellcheck source=lib/gpg-helpers.sh
+source "${SCRIPT_DIR}/lib/gpg-helpers.sh"
+
+# ── tomlkit gate
+#
+# Rewriting apps.toml in place requires comment/whitespace preservation
+# (the file ships hand-curated section headers and per-entry rationales
+# that the str-replace heuristic used in Phase 0 would silently destroy
+# when it can't anchor a key inside the array-of-tables shape).  We
+# rely on python3-tomlkit; if it's not installed, bail with a clean
+# error rather than fall back to a destructive strategy.
+#
+# Skipping the gate in --dry-run is intentional: --dry-run prints the
+# planned changes without touching disk, so tomlkit is not strictly
+# required.  We still warn so the user knows a real run would fail.
+if ! python3 -c 'import tomlkit' >/dev/null 2>&1; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+        warn "python3-tomlkit not installed — a real (non-dry-run) refresh will fail"
+        warn "  install with: sudo apt install python3-tomlkit"
+    else
+        err "python3-tomlkit not installed; cannot rewrite apps.toml without destroying comments."
+        err "  install with: sudo apt install python3-tomlkit"
+        err "  (then re-run setup, or 'apt update && apt install python3-tomlkit')"
+        exit 1
+    fi
+fi
 
 TODAY=$(date +%Y-%m-%d)
 TMPROOT=""
@@ -94,106 +157,160 @@ cleanup() { [[ -n "$TMPROOT" && -d "$TMPROOT" ]] && rm -rf "$TMPROOT"; }
 trap cleanup EXIT
 TMPROOT=$(mktemp -d -t refresh-pins.XXXXXX)
 
-# ── TOML read (same shape as verify-pins.sh).  Kept inline so the script
-# is standalone — installer adapters explicitly forbid cross-script imports.
-toml_extract() {
-    python3 - "$1" <<'PY'
-import sys, tomllib, shlex
-p = sys.argv[1]
-with open(p, "rb") as fh:
-    d = tomllib.load(fh)
-def emit(k, v):
-    if v is None: v = ""
-    if isinstance(v, list): v = ",".join(str(x) for x in v)
-    print(f"{k}={shlex.quote(str(v))}")
-meta = d.get("meta", {})
-inst = d.get("install", {})
-pin  = d.get("pin", {})
-emit("META_NAME",       meta.get("name", ""))
-emit("INSTALL_METHOD",  inst.get("method", ""))
-apr = inst.get("apt_pinned_repo", {})
-emit("APR_KEYRING_FILE",    apr.get("keyring_file", ""))
-emit("APR_SOURCES_FILE",    apr.get("sources_file", ""))
-emit("APR_SUITE",           apr.get("suite", ""))
-gh = inst.get("github_release", {})
-emit("GH_REPO",            gh.get("repo", ""))
-emit("GH_VERSION",          gh.get("version", ""))
-emit("GH_ASSET_PATTERN",    gh.get("asset_pattern", ""))
-emit("GH_SHA256_X86_64",    gh.get("sha256_x86_64", ""))
-emit("GH_SHA256_AARCH64",   gh.get("sha256_aarch64", ""))
-emit("GH_GPG_FINGERPRINT",  gh.get("gpg_fingerprint", ""))
-dd = inst.get("direct_deb", {})
-emit("DD_URL",     dd.get("url", ""))
-emit("DD_VERSION", dd.get("version", ""))
-emit("PIN_LAST_REFRESHED", pin.get("last_refreshed", ""))
-emit("HAS_PIN", "1" if pin else "0")
+# ── Schema-v2 manifest discovery
+#
+# Mirrors install-apps.sh::load_entries() / verify-pins.sh::load_entries().
+# Emits TSV: <source_file>\t<entry_index>\t<entry_json>.  Files without
+# a top-level [[apps]] array are silently skipped.
+load_entries() {
+    [[ -d "$APPS_DIR" ]] || return 0
+    local f base
+    local files=""
+    for f in "$APPS_DIR"/*.toml; do
+        [[ -e "$f" ]] || continue
+        base="$(basename "$f")"
+        case "$base" in
+            schema*.toml) continue ;;
+            _*.toml)      continue ;;
+            .*)           continue ;;
+        esac
+        files+="$f"$'\n'
+    done
+    [[ -n "$files" ]] || return 0
+    APPS_FILES="$files" python3 - <<'PY'
+import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+paths = [Path(line) for line in os.environ.get("APPS_FILES", "").splitlines() if line.strip()]
+for p in paths:
+    try:
+        with open(p, "rb") as fh:
+            data = tomllib.load(fh)
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+        print(f"# WARN unparseable {p}: {exc}", file=sys.stderr)
+        continue
+    apps = data.get("apps")
+    if not isinstance(apps, list):
+        continue
+    for idx, entry in enumerate(apps):
+        if not isinstance(entry, dict):
+            continue
+        sys.stdout.write(
+            f"{p}\t{idx}\t{json.dumps(entry, separators=(',', ':'))}\n"
+        )
 PY
 }
 
-# ── TOML write: targeted line-rewrite via Python.
+# Extract a JSON value via Python — keeps the script jq-free.
+# Usage: json_get '<json>' '<dotted.path>'  → prints value or empty.
+json_get() {
+    local json="$1" path="$2"
+    python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+for key in sys.argv[2].split("."):
+    if isinstance(data, dict) and key in data:
+        data = data[key]
+    else:
+        sys.exit(0)
+if isinstance(data, (list, tuple)):
+    print(" ".join(str(x) for x in data))
+elif isinstance(data, bool):
+    print("true" if data else "false")
+else:
+    print(data if data is not None else "")
+' "$json" "$path"
+}
+
+# ── TOML write via tomlkit — comment/whitespace-preserving in-place
+# rewrite of one field inside one [[apps]] entry.
 #
-# WHY not a full TOML library: tomlkit is the obvious choice for
-# round-tripping with preserved comments/whitespace, but Debian 13
-# doesn't ship it and we don't want to require pip on a freshly
-# bootstrapped box.  Our schema is regular enough — each scalar key
-# lives on its own line in `key = value` form — that an in-place
-# string substitution preserves comments, blank lines, and ordering
-# perfectly while staying inside the stdlib.
+# Args:
+#   $1 path   — absolute path to the apps.toml-shaped file to mutate
+#   $2 idx    — 0-based entry index within that file's `apps` list
+#   $3 dotted — dotted path inside the entry, e.g.:
+#                   "pin.last_refreshed"
+#                   "install.github_release.version"
+#                   "install.github_release.sha256_x86_64"
+#   $4 value  — new STRING value (quoting handled inside the writer)
 #
-# The helper finds the line `^<indent><key>\s*=` inside the chosen
-# [section] header's scope (delimited by the next `^[` line or EOF)
-# and rewrites the value, preserving any trailing inline comment.
+# Notes on tomlkit semantics:
+#   • Reading and writing must go through the same Document so trivia
+#     (comments, whitespace) is preserved.  We re-parse on every call —
+#     fine for refresh-pins because it touches at most a handful of
+#     fields per apps.toml file.
+#   • tomlkit's __setitem__ replaces the value-node in-place, keeping
+#     surrounding trivia (the inline `#` comment to the right of the
+#     value).
 toml_set() {
-    # $1 = path, $2 = section ("pin" / "install.github_release"), $3 = key, $4 = new value (already quoted/escaped)
-    local path="$1" section="$2" key="$3" newval="$4"
+    local path="$1" idx="$2" dotted="$3" newval="$4"
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "  would set [${section}].${key} = ${newval} in $(basename "$path")"
+        log "  would set apps[${idx}].${dotted} = \"${newval}\" in $(basename "$path")"
         return 0
     fi
-    python3 - "$path" "$section" "$key" "$newval" <<'PY'
-import sys, re, pathlib
-path, section, key, newval = sys.argv[1:5]
-text = pathlib.Path(path).read_text()
-lines = text.splitlines(keepends=True)
-want_header = f"[{section}]"
-in_section = False
-done = False
-key_re = re.compile(r'^(\s*)(' + re.escape(key) + r')(\s*=\s*)([^\n#]*?)(\s*(#.*)?)$')
-for i, line in enumerate(lines):
-    stripped = line.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
-        in_section = (stripped == want_header)
-        continue
-    if not in_section:
-        continue
-    m = key_re.match(line.rstrip("\n"))
-    if m:
-        indent, k, sep, _old, tail, _cmt = m.groups()
-        nl = "\n" if line.endswith("\n") else ""
-        lines[i] = f"{indent}{k}{sep}{newval}{tail or ''}{nl}"
-        done = True
-        break
-if not done:
-    sys.stderr.write(f"toml_set: did not find [{section}].{key} in {path}\n")
+    python3 - "$path" "$idx" "$dotted" "$newval" <<'PY'
+import sys
+import pathlib
+
+try:
+    import tomlkit
+except ImportError:
+    # The bash-side gate should have caught this; re-print here as a
+    # belt-and-braces guard so a corrupted environment fails loudly.
+    sys.stderr.write("toml_set: python3-tomlkit not importable\n")
+    sys.exit(2)
+
+path = pathlib.Path(sys.argv[1])
+idx = int(sys.argv[2])
+dotted = sys.argv[3]
+newval = sys.argv[4]
+
+doc = tomlkit.parse(path.read_text())
+
+apps = doc.get("apps")
+if apps is None or not isinstance(apps, list) or idx >= len(apps):
+    sys.stderr.write(f"toml_set: apps[{idx}] missing in {path}\n")
     sys.exit(3)
-pathlib.Path(path).write_text("".join(lines))
+entry = apps[idx]
+
+# Walk the dotted path, creating intermediate tables only if they
+# already exist (we never invent a new sub-table — the schema gates
+# that).  Last segment is the leaf we rewrite.
+parts = dotted.split(".")
+node = entry
+for p in parts[:-1]:
+    if p not in node:
+        sys.stderr.write(f"toml_set: intermediate '{p}' missing under apps[{idx}] in {path}\n")
+        sys.exit(4)
+    node = node[p]
+leaf = parts[-1]
+if leaf not in node:
+    sys.stderr.write(f"toml_set: leaf '{leaf}' missing under apps[{idx}].{'.'.join(parts[:-1])} in {path}\n")
+    sys.exit(5)
+
+# Assign as a tomlkit string so the existing inline comment (if any)
+# stays attached to the key-value line.
+node[leaf] = newval
+
+path.write_text(tomlkit.dumps(doc))
 PY
 }
-
-# Convenience: quote a string value for TOML re-insertion.  Numbers
-# (the only non-string scalar we write here is refresh_after_days,
-# which we never rewrite) would skip the quotes; everything we touch
-# is a string so we always quote.
-toml_q() { printf '"%s"' "${1//\"/\\\"}"; }
 
 # ── Per-method refresh handlers.
 #
 # Each sets REFRESH_OUTCOME to one of:
 #   bumped         last_refreshed date was advanced; no version change.
-#   updated        version + sha changed (real release bump).
-#   skipped        nothing to do (apt method, dry-run, etc.)
+#   skipped        nothing to do (apt method, frozen-pin upstream drift, etc.)
 #   failed         upstream rejected / network / sha mismatch.
 # and REFRESH_NOTE to a human-readable one-liner.
+#
+# Phase A intentionally drops the "updated" outcome — we no longer
+# auto-rewrite version/sha on a frozen tag bump.  The user reviews the
+# drift and edits the manifest by hand (or flips pin.mode to
+# track-latest).
 
 refresh_apt() {
     REFRESH_OUTCOME="skipped"
@@ -201,13 +318,43 @@ refresh_apt() {
 }
 
 refresh_apt_pinned_repo() {
-    local name="$1" toml="$2"
+    local name="$1" path="$2" idx="$3"
     local kf="${KEYRINGS_DIR}/${APR_KEYRING_FILE}"
     local sf="${SOURCES_DIR}/${APR_SOURCES_FILE}"
 
     if [[ ! -r "$kf" || ! -r "$sf" ]]; then
         REFRESH_OUTCOME="failed"
         REFRESH_NOTE="missing keyring or sources file"
+        return
+    fi
+
+    # ── Manifest-pin re-anchor BEFORE we trust the on-disk keyring.
+    # verify-pins.sh does the same check; without it here, a refresh
+    # would happily apt-get update against a keyring whose fingerprint
+    # has drifted from the manifest pin (an attacker who can rewrite
+    # the on-disk keyring file but not apps.toml could otherwise
+    # silently bump last_refreshed against an unpinned key).  Refuse
+    # outright on mismatch — the user must reconcile via the
+    # refresh-keys workflow before this method's refresh runs again.
+    if [[ -z "$APR_KEY_FINGERPRINT" ]]; then
+        REFRESH_OUTCOME="failed"
+        REFRESH_NOTE="install.apt_pinned_repo.key_fingerprint unset (validator should have caught this)"
+        return
+    fi
+    local on_disk_fpr
+    on_disk_fpr="$(fingerprint_of "$kf" || true)"
+    if [[ -z "$on_disk_fpr" ]]; then
+        REFRESH_OUTCOME="failed"
+        REFRESH_NOTE="could not read fingerprint from on-disk keyring ${APR_KEYRING_FILE}"
+        return
+    fi
+    if [[ "${on_disk_fpr^^}" != "${APR_KEY_FINGERPRINT^^}" ]]; then
+        err "${name}: on-disk keyring fingerprint does not match manifest pin"
+        err "  on-disk:  ${on_disk_fpr}"
+        err "  manifest: ${APR_KEY_FINGERPRINT}"
+        err "  refusing to refresh until reconciled (run refresh-keys.sh --app ${name})"
+        REFRESH_OUTCOME="failed"
+        REFRESH_NOTE="on-disk keyring fingerprint != manifest pin"
         return
     fi
 
@@ -243,7 +390,7 @@ refresh_apt_pinned_repo() {
             -o "Acquire::AllowInsecureRepositories=false" \
             -o "Acquire::AllowDowngradeToInsecureRepositories=false" \
             >/dev/null 2>"${tmpd}/err"; then
-        toml_set "$toml" "pin" "last_refreshed" "$(toml_q "$TODAY")"
+        toml_set "$path" "$idx" "pin.last_refreshed" "$TODAY"
         REFRESH_OUTCOME="bumped"
         REFRESH_NOTE="apt-get update verified the pinned key"
     else
@@ -254,28 +401,8 @@ refresh_apt_pinned_repo() {
     fi
 }
 
-# Compute sha256 of a URL by streaming through curl → sha256sum.  We do
-# not download to disk because some assets are large (>50MB) and we
-# only need the hash.  -f makes curl fail on HTTP 4xx/5xx instead of
-# saving the error body; -L follows GitHub's CDN redirect.
-sha256_of_url() {
-    local url="$1"
-    curl -fsSL --max-time 120 "$url" 2>/dev/null | sha256sum | awk '{print $1}'
-}
-
-# Expand "{arch}" / "{version}" tokens in an asset pattern.
-expand_asset() {
-    local pat="$1" arch="$2" version="$3"
-    # Strip leading "v" from version when expanding {version} — GitHub
-    # tags are conventionally "vX.Y.Z" but asset filenames usually drop
-    # the "v".  We try the bare version first; callers can iterate.
-    pat="${pat//\{arch\}/$arch}"
-    pat="${pat//\{version\}/$version}"
-    printf '%s' "$pat"
-}
-
 refresh_github_release() {
-    local name="$1" toml="$2"
+    local name="$1" path="$2" idx="$3"
     if [[ -z "$GH_REPO" ]]; then
         REFRESH_OUTCOME="failed"; REFRESH_NOTE="install.github_release.repo unset"
         return
@@ -294,83 +421,42 @@ refresh_github_release() {
         return
     fi
 
-    if [[ "$new_tag" == "$GH_VERSION" ]]; then
+    if [[ "$PIN_MODE" == "track-latest" ]]; then
+        # track-latest by design has no pinned version to compare
+        # against — the manifest defers to upstream.  Just bump the
+        # "we last looked at this" date.
         if [[ $DRY_RUN -eq 1 ]]; then
             REFRESH_OUTCOME="skipped"
-            REFRESH_NOTE="dry-run: ${GH_REPO} still at ${new_tag}; would bump date only"
+            REFRESH_NOTE="dry-run: ${GH_REPO} latest=${new_tag} (track-latest); would bump date only"
         else
-            toml_set "$toml" "pin" "last_refreshed" "$(toml_q "$TODAY")"
+            toml_set "$path" "$idx" "pin.last_refreshed" "$TODAY"
             REFRESH_OUTCOME="bumped"
-            REFRESH_NOTE="${GH_REPO} still at ${new_tag}"
+            REFRESH_NOTE="${GH_REPO} latest=${new_tag} (track-latest); bumped date"
         fi
         return
     fi
 
-    # Version drift — need new SHAs.  Try both architectures so the
-    # manifest stays portable; "" sha256_aarch64 means "skip aarch64".
-    local version_bare="${new_tag#v}"
-    local sha_x="" sha_a=""
-
-    # Build candidate URLs.  We try {version_bare} first, then {new_tag}
-    # because asset names vary across upstreams.
-    local asset_x asset_a url_x="" url_a=""
-    for v in "$version_bare" "$new_tag"; do
-        asset_x=$(expand_asset "$GH_ASSET_PATTERN" "x86_64" "$v")
-        asset_a=$(expand_asset "$GH_ASSET_PATTERN" "aarch64" "$v")
-        # The releases body lists "browser_download_url" entries; we grep
-        # rather than recurse with python so we keep deps minimal here.
-        url_x=$(printf '%s' "$body" | python3 -c '
-import json, sys, re
-d = json.load(sys.stdin)
-pat = re.compile(re.escape(sys.argv[1]))
-for a in d.get("assets", []):
-    if pat.search(a.get("name","")):
-        print(a.get("browser_download_url",""))
-        break
-' "$asset_x" 2>/dev/null || true)
-        url_a=$(printf '%s' "$body" | python3 -c '
-import json, sys, re
-d = json.load(sys.stdin)
-pat = re.compile(re.escape(sys.argv[1]))
-for a in d.get("assets", []):
-    if pat.search(a.get("name","")):
-        print(a.get("browser_download_url",""))
-        break
-' "$asset_a" 2>/dev/null || true)
-        [[ -n "$url_x" || -n "$url_a" ]] && break
-    done
-
-    if [[ -n "$url_x" ]]; then
-        sha_x=$(sha256_of_url "$url_x" || true)
-    fi
-    if [[ -n "$GH_SHA256_AARCH64" && -n "$url_a" ]]; then
-        # Only attempt aarch64 if the existing pin has a slot for it.
-        sha_a=$(sha256_of_url "$url_a" || true)
-    fi
-
-    if [[ -z "$sha_x" ]]; then
-        REFRESH_OUTCOME="failed"
-        REFRESH_NOTE="${GH_REPO}: could not download/hash x86_64 asset (pattern: ${GH_ASSET_PATTERN})"
+    # frozen mode (or unspecified — treat as frozen for safety).
+    if [[ "$new_tag" == "$GH_VERSION" ]]; then
+        if [[ $DRY_RUN -eq 1 ]]; then
+            REFRESH_OUTCOME="skipped"
+            REFRESH_NOTE="dry-run: ${GH_REPO} still at ${new_tag} (frozen); would bump date only"
+        else
+            toml_set "$path" "$idx" "pin.last_refreshed" "$TODAY"
+            REFRESH_OUTCOME="bumped"
+            REFRESH_NOTE="${GH_REPO} still at ${new_tag} (frozen)"
+        fi
         return
     fi
 
-    if [[ $DRY_RUN -eq 1 ]]; then
-        REFRESH_OUTCOME="updated"
-        REFRESH_NOTE="dry-run: ${GH_REPO} ${GH_VERSION} -> ${new_tag} (sha_x=${sha_x:0:12}…)"
-        return
-    fi
-    toml_set "$toml" "install.github_release" "version"       "$(toml_q "$new_tag")"
-    toml_set "$toml" "install.github_release" "sha256_x86_64" "$(toml_q "$sha_x")"
-    if [[ -n "$sha_a" ]]; then
-        toml_set "$toml" "install.github_release" "sha256_aarch64" "$(toml_q "$sha_a")"
-    fi
-    toml_set "$toml" "pin" "last_refreshed" "$(toml_q "$TODAY")"
-    REFRESH_OUTCOME="updated"
-    REFRESH_NOTE="${GH_REPO} ${GH_VERSION} -> ${new_tag}"
+    # Frozen + tag drift — REFUSE to auto-rewrite.  Phase A policy:
+    # a human reviews release notes before we move a frozen pin.
+    REFRESH_OUTCOME="skipped"
+    REFRESH_NOTE="${GH_REPO}: track-latest mode would auto-bump to ${new_tag}; frozen requires manual review (pinned=${GH_VERSION})"
 }
 
 refresh_direct_deb() {
-    local name="$1" toml="$2"
+    local name="$1" path="$2" idx="$3"
     if [[ -z "$DD_URL" ]]; then
         REFRESH_OUTCOME="failed"; REFRESH_NOTE="install.direct_deb.url unset"
         return
@@ -382,7 +468,7 @@ refresh_direct_deb() {
             REFRESH_OUTCOME="skipped"
             REFRESH_NOTE="dry-run: ${DD_URL} reachable; would bump date only"
         else
-            toml_set "$toml" "pin" "last_refreshed" "$(toml_q "$TODAY")"
+            toml_set "$path" "$idx" "pin.last_refreshed" "$TODAY"
             REFRESH_OUTCOME="bumped"
             REFRESH_NOTE="HEAD ${DD_URL} → 2xx (URL alive; version field NOT re-derived)"
         fi
@@ -395,51 +481,61 @@ refresh_direct_deb() {
 # ── Driver ─────────────────────────────────────────────────────────
 if [[ ! -d "$APPS_DIR" ]]; then
     log "no apps configured"
-    [[ $QUIET -eq 1 ]] || printf '\nsummary: 0 bumped, 0 updated, 0 failed\n'
+    [[ $QUIET -eq 1 ]] || printf '\nsummary: 0 bumped, 0 failed, 0 skipped\n'
     exit 0
 fi
 
-shopt -s nullglob
-manifests=()
-for f in "$APPS_DIR"/*.toml; do
-    base=$(basename "$f")
-    [[ "$base" == schema*.toml || "$base" == _*.toml ]] && continue
+ENTRIES="$(load_entries)"
+if [[ -z "$ENTRIES" ]]; then
     if [[ -n "$ONLY_APP" ]]; then
-        [[ "$base" == "${ONLY_APP}.toml" ]] && manifests+=("$f")
-    else
-        manifests+=("$f")
-    fi
-done
-shopt -u nullglob
-
-if [[ ${#manifests[@]} -eq 0 ]]; then
-    if [[ -n "$ONLY_APP" ]]; then
-        die "no manifest matched --app ${ONLY_APP}"
+        die "no [[apps]] entry matched --app ${ONLY_APP}"
     fi
     log "no apps configured"
-    [[ $QUIET -eq 1 ]] || printf '\nsummary: 0 bumped, 0 updated, 0 failed\n'
+    [[ $QUIET -eq 1 ]] || printf '\nsummary: 0 bumped, 0 failed, 0 skipped\n'
     exit 0
 fi
 
-bumped=0; updated=0; failed=0; skipped=0
-declare -a UPDATED_LINES=()
+# If --app was passed, filter BEFORE per-entry work so a missing name
+# surfaces as a die() rather than a silent 0-entry pass.
+if [[ -n "$ONLY_APP" ]]; then
+    FILTERED=""
+    while IFS=$'\t' read -r _src _idx entry_json; do
+        [[ -n "$entry_json" ]] || continue
+        probe_name="$(json_get "$entry_json" 'name')"
+        if [[ "$probe_name" == "$ONLY_APP" ]]; then
+            FILTERED+="${_src}"$'\t'"${_idx}"$'\t'"${entry_json}"$'\n'
+        fi
+    done <<<"$ENTRIES"
+    if [[ -z "$FILTERED" ]]; then
+        die "no [[apps]] entry matched --app ${ONLY_APP}"
+    fi
+    ENTRIES="$FILTERED"
+fi
+
+bumped=0; failed=0; skipped=0
+declare -a BUMPED_LINES=()
 declare -a FAILED_LINES=()
 
-for toml in "${manifests[@]}"; do
-    name=$(basename "$toml" .toml)
-    raw="$(toml_extract "$toml" 2>/dev/null || true)"
-    if [[ -z "$raw" ]]; then
-        err "${name}: toml-parse-error — skipping"
-        failed=$((failed+1))
-        FAILED_LINES+=("$name: toml-parse-error")
-        continue
-    fi
-    META_NAME="" INSTALL_METHOD="" HAS_PIN="0"
-    APR_KEYRING_FILE="" APR_SOURCES_FILE="" APR_SUITE=""
-    GH_REPO="" GH_VERSION="" GH_ASSET_PATTERN="" GH_SHA256_X86_64="" GH_SHA256_AARCH64="" GH_GPG_FINGERPRINT=""
-    DD_URL="" DD_VERSION=""
-    PIN_LAST_REFRESHED=""
-    eval "$raw"
+while IFS=$'\t' read -r src_file entry_idx entry_json; do
+    [[ -n "$entry_json" ]] || continue
+
+    # Pull every field per-iteration into locals — keeping them prefixed
+    # mirrors the previous toml_extract layout so the per-method
+    # handlers can be read without context-switching.
+    name="$(json_get "$entry_json" 'name')"
+    INSTALL_METHOD="$(json_get "$entry_json" 'install.method')"
+    PIN_MODE="$(json_get "$entry_json" 'pin.mode')"
+    PIN_LAST_REFRESHED="$(json_get "$entry_json" 'pin.last_refreshed')"
+
+    APR_KEYRING_FILE="$(json_get "$entry_json" 'install.apt_pinned_repo.keyring_file')"
+    APR_SOURCES_FILE="$(json_get "$entry_json" 'install.apt_pinned_repo.sources_file')"
+    APR_KEY_FINGERPRINT="$(json_get "$entry_json" 'install.apt_pinned_repo.key_fingerprint')"
+
+    GH_REPO="$(    json_get "$entry_json" 'install.github_release.repo')"
+    GH_VERSION="$( json_get "$entry_json" 'install.github_release.version')"
+
+    DD_URL="$(    json_get "$entry_json" 'install.direct_deb.url')"
+    DD_VERSION="$(json_get "$entry_json" 'install.direct_deb.version')"
 
     if [[ -n "$ONLY_METHOD" && "$INSTALL_METHOD" != "$ONLY_METHOD" ]]; then
         continue
@@ -450,9 +546,9 @@ for toml in "${manifests[@]}"; do
 
     case "$INSTALL_METHOD" in
         apt)              refresh_apt ;;
-        apt-pinned-repo)  refresh_apt_pinned_repo "$name" "$toml" ;;
-        github-release)   refresh_github_release  "$name" "$toml" ;;
-        direct-deb)       refresh_direct_deb      "$name" "$toml" ;;
+        apt-pinned-repo)  refresh_apt_pinned_repo "$name" "$src_file" "$entry_idx" ;;
+        github-release)   refresh_github_release  "$name" "$src_file" "$entry_idx" ;;
+        direct-deb)       refresh_direct_deb      "$name" "$src_file" "$entry_idx" ;;
         "")               REFRESH_OUTCOME="failed"; REFRESH_NOTE="install.method unset" ;;
         *)                REFRESH_OUTCOME="failed"; REFRESH_NOTE="unknown install.method: ${INSTALL_METHOD}" ;;
     esac
@@ -461,11 +557,7 @@ for toml in "${manifests[@]}"; do
         bumped)
             bumped=$((bumped+1))
             ok  "$name: $REFRESH_NOTE"
-            ;;
-        updated)
-            updated=$((updated+1))
-            ok  "$name: $REFRESH_NOTE"
-            UPDATED_LINES+=("$name|$GH_VERSION|$REFRESH_NOTE")
+            BUMPED_LINES+=("$name")
             ;;
         skipped)
             skipped=$((skipped+1))
@@ -477,30 +569,22 @@ for toml in "${manifests[@]}"; do
             FAILED_LINES+=("$name: $REFRESH_NOTE")
             ;;
     esac
-done
+done <<<"$ENTRIES"
 
 # Summary at end — printed unconditionally in non-quiet mode; under
 # --quiet only failures escape to stderr (warn() above already did that).
 if [[ $QUIET -eq 0 ]]; then
-    printf '\nsummary: %d bumped, %d updated, %d failed, %d skipped\n' \
-        "$bumped" "$updated" "$failed" "$skipped"
-    if [[ ${#UPDATED_LINES[@]} -gt 0 || $bumped -gt 0 ]]; then
+    printf '\nsummary: %d bumped, %d failed, %d skipped\n' \
+        "$bumped" "$failed" "$skipped"
+    if [[ $bumped -gt 0 ]]; then
         printf '\nnext steps:\n'
         printf '    $ git diff config/apps/\n'
-        if [[ ${#UPDATED_LINES[@]} -gt 0 ]]; then
-            for line in "${UPDATED_LINES[@]}"; do
-                IFS='|' read -r u_name _u_oldver u_note <<<"$line"
-                printf '    $ git add config/apps/%s.toml\n' "$u_name"
-                printf '    $ git commit -m "refresh: %s"\n' "$u_note"
-            done
-        else
-            printf '    $ git add config/apps/\n'
-            printf '    $ git commit -m "refresh: bump pin dates"\n'
-        fi
+        printf '    $ git add config/apps/\n'
+        printf '    $ git commit -m "refresh: bump pin dates"\n'
     fi
 fi
 
-# Failed > 0 is a non-zero exit so cron + MAILTO surfaces it.  Bumped
-# / updated are normal outcomes.
+# Failed > 0 is a non-zero exit so cron + MAILTO surfaces it.  Bumped /
+# skipped are normal outcomes.
 [[ $failed -eq 0 ]] || exit 1
 exit 0

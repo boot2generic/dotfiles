@@ -1,0 +1,24 @@
+# Phase C — declarative apt source for Signal Desktop.
+#
+# WHY this file lives in the repo:
+#   The apt-pinned-repo adapter consumes the descriptor at
+#   config/apps/apps.toml::name=signal-desktop and deploys this deb822
+#   sources file to /etc/apt/sources.list.d/signal-desktop.sources at
+#   install time, alongside the tracked keyring at
+#   config/system/etc/apt/keyrings/signal-desktop-keyring.asc.
+#
+#   Signal pins to the "xenial" suite across distros — that's not a typo,
+#   it's Signal's only published apt suite (they don't track Debian
+#   codenames).  Architectures: amd64 because Signal Desktop only ships
+#   for x86_64.
+#
+# Signing-key fingerprint pinned in config/apps/apps.toml.  Source of
+# truth (rotation cadence multi-year):
+#   https://signal.org/download/
+
+Types: deb
+URIs: https://updates.signal.org/desktop/apt
+Suites: xenial
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/signal-desktop-keyring.asc

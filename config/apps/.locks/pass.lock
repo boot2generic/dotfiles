@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "pass"
+install_method    = "apt"
+installed_at      = "2026-05-24T16:50:07Z"
+installed_version = "1.7.4-7"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "apt-archive"
+manifest_pin_mode = "track-latest"

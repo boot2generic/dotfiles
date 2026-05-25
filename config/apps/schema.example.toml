@@ -1,139 +1,248 @@
-# config/apps/schema.example.toml — copy-and-trim worked example
+# config/apps/schema.example.toml — worked example for the schema_version=2 layout
 #
-# This file exercises EVERY install method and EVERY optional field at once,
-# which is intentionally nonsensical — a real app would pick ONE [install.*]
-# subtable.  The comments call out which sections are mutually exclusive.
+# This file demonstrates every install method and both pin modes in a SINGLE
+# apps.toml-shaped document.  Each [[apps]] entry stands alone — copy/paste
+# the one closest to what you need into your real apps.toml and adjust.
+#
+# The dispatcher and validator both skip files matching `schema*.toml`, so
+# this file is documentation only.  See schema.toml for the field-by-field
+# reference.
+#
+# Mutual-exclusion rules at a glance:
+#
+#   • Exactly ONE [apps.install.*] subtable per entry, matching install.method:
+#       method = "apt"             → no subtable (just install.method, optional install.package)
+#       method = "apt-pinned-repo" → [apps.install.apt_pinned_repo] REQUIRED
+#       method = "github-release"  → [apps.install.github_release]   REQUIRED
+#       method = "direct-deb"      → [apps.install.direct_deb]        REQUIRED
+#     Any OTHER method subtable being present is a validator ERROR.
+#
+#   • direct-deb is frozen-only: pin.mode = "frozen" is the only legal value.
+#
+#   • Frozen mode requires hard pins:
+#       github-release → version + sha256_x86_64 REQUIRED
+#       direct-deb     → version + sha256       REQUIRED (already enforced by subtable)
+#       apt / apt-pinned-repo → no version pin in the manifest (apt manages
+#                                versions); pin.last_refreshed REQUIRED.
+#
+#   • Track-latest mode forbids hard pins:
+#       github-release → version / sha256_x86_64 / sha256_aarch64 MUST be
+#                         absent or empty strings.
+#       direct-deb     → track-latest is FORBIDDEN entirely (see rule 2).
 #
 # How to use:
-#   1. cp config/apps/schema.example.toml config/apps/<your-app>.toml
-#   2. Pick exactly ONE install method.
-#   3. Delete the [install.*] subtables that don't match your method.
-#   4. Delete optional sections you don't need ([configs], hook arrays).
-#   5. Run `scripts/install-apps.sh --app <your-app> --dry-run` to validate.
+#   1. Identify which entry below matches your install method + pin mode.
+#   2. Copy that single [[apps]] stanza into your real config/apps/apps.toml.
+#   3. Trim placeholders, fill in real values, and run
+#         scripts/apps-cli.sh validate
+#      until the validator is happy.
+
+# ============================================================
+# top-level: schema_version
+# ============================================================
+# Every apps.toml-shaped file needs this exactly once at the top, before any
+# [[apps]] entries.  schema_version = 2 is the current layout.
+schema_version = 2
+
+# ============================================================
+# Example 1 — method = "apt"
+# ============================================================
+# Plain apt install.  No method subtable required; the dispatcher just
+# delegates to `apt-get install -y <package or name>`.
 #
-# The dispatcher skips files named schema*.toml, so renaming this file in
-# place would do nothing useful — always copy first.
+# Pin mode: "track-latest" — apt manages versions and signs Release files
+# itself, so the manifest carries no hard pin.  last_refreshed is kept as
+# a "we last looked at this" annotation.
+[[apps]]
+name         = "ripgrep-example"
+display_name = "ripgrep (example)"
+machines     = ["common"]
+description  = "Fast grep replacement.  Listed here purely to show the minimal apt entry shape."
+docs_url     = "https://github.com/BurntSushi/ripgrep"
+enabled      = true
+
+[apps.install]
+method  = "apt"
+# Use `package` only when the apt name differs from `name`.  Most apps
+# leave it unset.  Example: `bat` ships as `batcat` on Debian, so a real
+# entry for bat would set `package = "batcat"` here.
+# package = "ripgrep"
+
+[apps.pin]
+mode           = "track-latest"
+last_refreshed = "2026-05-22"
+# refresh_after_days defaults to 90 when omitted.
 
 # ============================================================
-# [meta] — identity + scope
+# Example 2 — method = "apt-pinned-repo", pin.mode = "track-latest"
 # ============================================================
-[meta]
-name         = "example-app"                # canonical key; not a real package
-display_name = "Example App"                # shown in --list and progress logs
-machines     = ["common", "t14", "desktop"] # install everywhere
-description  = "Imaginary app proving the schema covers every field."
-docs_url     = "https://example.invalid/docs"
-
-# ============================================================
-# [install] — pick exactly ONE method
-# ============================================================
-[install]
-# Comment / uncomment to switch which method this example demonstrates.
-# Only ONE of the [install.apt_pinned_repo], [install.github_release],
-# [install.direct_deb] subtables below may be present in a real manifest.
-method  = "github-release"
-package = "example-app"                     # optional override of meta.name
-
-# ============================================================
-# Method-specific subtable: apt
-# ============================================================
-# No subtable is needed when method = "apt".  The dispatcher just runs
-# `apt-get install -y <package or meta.name>`.  Example:
+# Third-party apt repo with a verified GPG key.  Once registered, apt
+# manages the package version — so the manifest carries the key
+# fingerprint and source-file basenames but NO per-version pin.
 #
-#   [meta]
-#   name = "ripgrep"
-#   machines = ["common"]
-#   [install]
-#   method = "apt"
-#
-# That's the whole manifest.  (No [pin] block — apt is OS-pinned.)
+# Track-latest mode means: the validator will NOT accept a
+# `version` / `sha256_*` field here (none exist in apt_pinned_repo
+# anyway).  pin.last_refreshed acts as the "key/repo audit date".
+[[apps]]
+name         = "example-vpn"
+display_name = "Example VPN"
+machines     = ["common"]
+description  = "Imaginary VPN client — placeholder showing the apt-pinned-repo + track-latest shape."
+docs_url     = "https://vpn.example.invalid/help/install"
 
-# ============================================================
-# Method-specific subtable: apt-pinned-repo
-# (when method = "apt-pinned-repo", this subtable is REQUIRED
-#  and the github_release / direct_deb subtables must be absent)
-# ============================================================
-[install.apt_pinned_repo]
-package         = "example-app"
-suite_url       = "https://download.example.invalid/apt"
-suite           = "$(distro_codename)"      # adapter substitutes `lsb_release -cs`
-                                            # — lets one manifest serve multiple
-                                            # Debian releases without an edit.
+[apps.install]
+method = "apt-pinned-repo"
+
+[apps.install.apt_pinned_repo]
+package         = "example-vpn"
+suite_url       = "https://repository.example.invalid/deb/stable"
+# `$(distro_codename)` is substituted with `lsb_release -cs` at install
+# time.  Lets one manifest serve trixie / bookworm / future Debian releases.
+suite           = "$(distro_codename)"
 components      = ["main"]
-key_url         = "https://download.example.invalid/keys/example-app-archive-keyring.asc"
-key_fingerprint = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
-keyring_file    = "example-app-archive-keyring.gpg"
-sources_file    = "example-app.sources"
+key_url         = "https://repository.example.invalid/deb/example-vpn-keyring.asc"
+# Exactly 40 hex chars, UPPERCASE convention.  This is a clearly-fake
+# placeholder — replace with the real fingerprint after fetching the key
+# and running `gpg --show-keys --with-colons` against it.
+key_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567"
+# Basenames only.  The adapter looks for tracked copies under
+# config/system/etc/apt/keyrings/ and config/system/etc/apt/sources.list.d/.
+keyring_file    = "example-vpn-keyring.asc"
+sources_file    = "example-vpn.sources"
+
+[apps.pin]
+mode           = "track-latest"
+last_refreshed = "2026-05-22"
+# refresh_after_days defaults to 90.
 
 # ============================================================
-# Method-specific subtable: github-release
-# (when method = "github-release", this subtable is REQUIRED;
-#  the apt_pinned_repo / direct_deb subtables must be absent)
+# Example 3 — method = "github-release", pin.mode = "frozen"
 # ============================================================
-[install.github_release]
-repo            = "example-org/example-app"
-asset_pattern   = "example-app-v{version}-{arch}-unknown-linux-gnu.tar.gz"
-                                            # {arch} → "x86_64" or "aarch64";
-                                            # {version} → the `version` below
-                                            # (literal — no auto-stripping of "v").
+# Tagged GitHub release with hard pins.  Frozen mode requires both
+# `version` and `sha256_x86_64` inside the github_release subtable; the
+# installer refuses on hash mismatch.
+[[apps]]
+name         = "example-cli"
+display_name = "Example CLI"
+machines     = ["common", "t14", "desktop"]
+description  = "Imaginary CLI tool.  Demonstrates github-release + frozen pin with arch-specific shas."
+docs_url     = "https://github.com/example-org/example-cli"
+
+[apps.install]
+method = "github-release"
+
+[apps.install.github_release]
+repo            = "example-org/example-cli"
+# {arch} → "x86_64" or "aarch64"; {version} → the `version` field below
+# (literal substitution, no auto-stripping of the "v" prefix).
+asset_pattern   = "example-cli-{version}-{arch}-unknown-linux-gnu.tar.gz"
+install_to      = "/usr/local/bin/example-cli"
 version         = "v1.2.3"
-install_to      = "/usr/local/bin/example-app"
 sha256_x86_64   = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-sha256_aarch64  = ""                        # empty = "this app ships x86_64 only"
-gpg_fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567"
-                                            # empty = "upstream doesn't sign"
-extract_path    = "example-app-v1.2.3-x86_64-unknown-linux-gnu/example-app"
-                                            # path inside the tarball to the
-                                            # binary; relative, no leading slash.
+# Empty string declares "x86_64-only".  Keep the key present.
+sha256_aarch64  = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+# Empty string disables the signature check (e.g. for upstreams that
+# don't sign releases).  When set, it's exactly 40 UPPERCASE hex chars.
+gpg_fingerprint = ""
+# Relative path inside the tarball to the binary.  Empty string for raw
+# single-file assets (when the downloaded artifact IS the binary).
+extract_path    = "example-cli-v1.2.3-x86_64-unknown-linux-gnu/example-cli"
 
-# ============================================================
-# Method-specific subtable: direct-deb
-# (when method = "direct-deb", this subtable is REQUIRED;
-#  the apt_pinned_repo / github_release subtables must be absent)
-# ============================================================
-[install.direct_deb]
-url     = "https://download.example.invalid/example-app_1.2.3_amd64.deb"
-sha256  = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-version = "1.2.3"
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-22"
+refresh_after_days = 90
 
-# ============================================================
-# [pin] — required for every method except plain "apt"
-# ============================================================
-[pin]
-last_refreshed     = "2026-05-19"           # set by `scripts/refresh-pins.sh`
-refresh_after_days = 90                     # audit.sh + conky check_pins() flag
-                                            # anything past this threshold.
+# Optional [apps.configs] block — deploys post-install dotfiles.
+#
+# Sources are resolved relative to config/apps/example-cli/ — drop the
+# actual files into that subdirectory and the validator will check they
+# exist.  Setting overlay = true lets ~/.config/dotfiles-local/example-cli/
+# override the in-repo source at apply time (machine-local tweaks).
+[apps.configs]
+"/home/$USER/.config/example-cli/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
+"/etc/example-cli/policy.json"                = { source = "policy.json", mode = "0644", overlay = false }
 
-# ============================================================
-# [configs] — optional file-deploy map
-# ============================================================
-# Sources are resolved relative to config/apps/example-app/ — drop the
-# actual files into that subdirectory.  The dispatcher does NOT create
-# the parent directories of dest paths; the install-method adapter or a
-# pre_install hook should.
-[configs]
-"/home/USER/.config/example-app/config.toml" = { source = "config.toml", mode = "0644", overlay = true }
-"/etc/example-app/policy.json"               = { source = "policy.json", mode = "0644", overlay = false }
-
-# ============================================================
-# Hook arrays — optional, run in array order
-# ============================================================
-# Run as the install user (not root).  Use sudo inside the command if a
-# step needs elevation.  Placeholders:
-#   {app_dir}  → absolute path to config/apps/example-app/
-#   {name}     → "example-app"
-[[hooks.pre_install]]
-description = "remove a stale legacy config the new package would refuse to overwrite"
-command     = "sudo rm -f /etc/{name}/legacy.conf"
-
-[[hooks.pre_install]]
-description = "ensure dest config dir exists before [configs] deploys into it"
+# Optional hook arrays — run as the install user (NOT root); use sudo
+# inside the command if a step needs elevation.  Placeholders:
+#   {app_dir}  → absolute path to config/apps/example-cli/
+#   {name}     → "example-cli"
+[[apps.hooks.pre_install]]
+description = "ensure dest config dir exists before [apps.configs] deploys into it"
 command     = "install -d -m 0755 /home/$USER/.config/{name}"
 
-[[hooks.post_install]]
-description = "enable the unit file shipped by the package"
-command     = "sudo systemctl enable --now {name}.service"
+[[apps.hooks.post_install]]
+description = "echo deployed name + source dir — handy in --dry-run logs"
+command     = "echo deployed {name} from {app_dir}"
 
-[[hooks.post_install]]
-description = "echo where we deployed from — handy in --dry-run logs"
-command     = "echo deployed {name} using {app_dir}"
+# ============================================================
+# Example 4 — method = "direct-deb", pin.mode = "frozen"
+# ============================================================
+# Vendor-hosted .deb (e.g. Microsoft Edge, Slack).  direct-deb is the
+# least-trusted method — no apt repo metadata signing, no per-release
+# GPG signature, just a manifest-pinned sha256.  Frozen is the ONLY
+# legal pin mode here; the validator rejects track-latest for direct-deb.
+[[apps]]
+name         = "example-deb"
+display_name = "Example .deb vendor app"
+machines     = ["common"]
+description  = "Imaginary direct-deb app.  Demonstrates the most-locked-down install method."
+docs_url     = "https://example.invalid/downloads/linux"
+
+[apps.install]
+method = "direct-deb"
+
+[apps.install.direct_deb]
+url     = "https://download.example.invalid/example-app_1.2.3_amd64.deb"
+sha256  = "1111111111111111111111111111111111111111111111111111111111111111"
+# Human label — lets us spot drift without re-parsing the URL.
+version = "1.2.3"
+
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-22"
+refresh_after_days = 30
+
+# ============================================================
+# Example 5 — browser extensions on a (fake) firefox-esr entry
+# ============================================================
+# Only meaningful when name matches the browser-policy generator's
+# allowlist (firefox-esr / mullvad-browser / librewolf / ...).  Each
+# [[apps.browser_extensions]] entry contributes one record to the
+# browser's policies.json.  `guid` must be unique within this app.
+#
+# This entry is intentionally named "firefox-esr-example" so it does NOT
+# match the real allowlist; rename to firefox-esr in your real manifest
+# to enable policy generation.
+[[apps]]
+name         = "firefox-esr-example"
+display_name = "Firefox ESR (example)"
+machines     = ["common"]
+description  = "Stand-in for the real firefox-esr entry — shows how to declare extensions."
+docs_url     = "https://www.mozilla.org/firefox/enterprise/"
+
+[apps.install]
+method = "apt"
+
+[apps.pin]
+mode           = "track-latest"
+last_refreshed = "2026-05-22"
+
+[[apps.browser_extensions]]
+name      = "Example Content Blocker"
+# AMO ID.  Legal forms:
+#   • <slug>@<domain.tld>       e.g. "uBlock0@raymondhill.net"
+#   • {UUID-form}               e.g. "{446900e4-71c2-419f-a6a7-df9c091e268b}"
+#   • <slug>@jetpack            legacy SDK addons
+#   • <addon-id>@<vendor>       e.g. "example-blocker@example.invalid"
+guid      = "example-blocker@example.invalid"
+amo_slug  = "example-content-blocker"
+mode      = "force_installed"   # one of: force_installed | allowed | blocked
+version   = "1.0.0"             # OPTIONAL — pins a specific extension version
+
+[[apps.browser_extensions]]
+name      = "Example Cookie Manager"
+guid      = "{00000000-0000-0000-0000-000000000001}"
+amo_slug  = "example-cookie-manager"
+mode      = "allowed"
+# version omitted → AMO chooses whichever version satisfies the policy.

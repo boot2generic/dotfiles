@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "signal-desktop"
+install_method    = "apt-pinned-repo"
+installed_at      = "2026-05-24T16:51:39Z"
+installed_version = "8.11.0"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "gpg-keyring:DBA36B5181D0C816F630E889D980A17457F6FB06"
+manifest_pin_mode = "track-latest"

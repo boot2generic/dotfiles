@@ -1,0 +1,24 @@
+# Phase C — declarative apt source for Microsoft Visual Studio Code.
+#
+# OPT-IN — the matching apps.toml entry ships `enabled = false`.  The
+# dotfiles default is VSCodium (open-source rebuild without MS telemetry).
+# Microsoft VSCode is included here because the user's actual workflow
+# uses Microsoft-marketplace-only extensions (Python tooling, Jupyter,
+# Remote-SSH, GitHub Copilot Chat) that Open VSX cannot ship.
+#
+# Telemetry posture: the dotfiles-shipped settings.json sets
+# `telemetry.telemetryLevel = "off"` + a half-dozen related keys.
+# Microsoft still receives the apt-fetch HTTP traffic itself; the
+# binary just doesn't phone home after install.
+#
+# Signing-key fingerprint pinned in config/apps/apps.toml.  Source of
+# truth (rotation cadence multi-year, Microsoft release signing key):
+#   https://learn.microsoft.com/en-us/linux/install
+#   https://packages.microsoft.com/keys/microsoft.asc
+
+Types: deb
+URIs: https://packages.microsoft.com/repos/code
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Signed-By: /etc/apt/keyrings/microsoft-keyring.asc

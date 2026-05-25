@@ -1,0 +1,68 @@
+; config/apps/okular/okularpartrc — KDE/Plasma PDF viewer baseline.
+;
+; KDE INI format.  Deployed to ~/.config/okularpartrc (mode 0644).
+; The "part" name reflects okular's architecture: most of the viewer
+; lives in a KParts plugin; the application binary is a thin shell.
+;
+; Settings are read from BOTH ~/.config/okularpartrc (the KPart, which
+; this file touches) AND ~/.config/okularrc (the application shell);
+; the load-bearing privacy settings live in the KPart's [Dlg
+; Performance] / [PageView] sections.
+
+[Dlg Performance]
+; Limit memory-mapped DocumentData on large PDFs.  Lower values reduce
+; the chance of OOM on malicious oversize files at the cost of slower
+; redraws.  "1" = low memory profile.
+MemoryLevel=1
+
+[General]
+ShowScrollBars=true
+; Don't switch to the "fit-to-page" zoom on first open of every doc —
+; preserve the user's previously-chosen zoom.
+ZoomMode=2
+; ShowSourceLocations: leaks LaTeX source paths.  Off.
+ShowSourceLocationsGraphically=false
+; Do not collect viewing-statistics.
+SendCrashReports=false
+
+[KFileDialog Settings]
+; Recent files limit — modest cap.
+RecentFiles=10
+
+[PageView]
+; JavaScript inside PDFs — DISABLED.  This is the load-bearing setting
+; for "I might open a random PDF and not worry about exploits".
+ChkEnableJavaScriptForms=false
+; Form filling itself stays enabled (read-only forms are useful) but
+; auto-script-execution does not.
+EnableFormCalculatePrintField=false
+
+[Performance]
+; Same memory cap as [Dlg Performance].  Two keys, one intent — KDE
+; reads whichever one a given build looks at.
+ChkEnableJavaScriptForms=false
+
+[Dlg Accessibility]
+; Leave accessibility prefs at defaults — the user can adjust per
+; eyesight / colour-blindness needs.
+
+[Dlg Annotations]
+; Use a generic author label for annotations.  IMPORTANT: this is
+; intentionally NOT the user's real name; the value is a literal that
+; the user can change in Settings → Annotations.  The repo MUST NOT
+; ship the user's real name here.
+AuthorName=Reader
+
+[Dlg Editor]
+; External text editor for "Open in Editor" actions — empty by default
+; so we don't prefill kate / kwrite (those may not be installed).
+ExternalEditor=
+
+[Dlg General]
+; Don't show the "Tip of the Day" on launch.
+ShowTipsOnStartup=false
+; Open new files in a new tab rather than a new window.
+ShellOpenFileInTabs=true
+; "Watch for changes" — re-reads the file when it changes on disk.
+; Useful for LaTeX preview workflows; safe (no network).
+WatchFile=true

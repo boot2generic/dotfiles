@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "syncthing"
+install_method    = "apt-pinned-repo"
+installed_at      = "2026-05-24T16:51:47Z"
+installed_version = "1.30.0"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "gpg-keyring:FBA2E162F2F44657B38F0309E5665F9BD5970C47"
+manifest_pin_mode = "track-latest"

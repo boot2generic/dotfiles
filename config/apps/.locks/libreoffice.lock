@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "libreoffice"
+install_method    = "apt"
+installed_at      = "2026-05-24T16:51:08Z"
+installed_version = "4:25.2.3-2+deb13u4"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "apt-archive"
+manifest_pin_mode = "track-latest"

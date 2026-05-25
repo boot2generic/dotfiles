@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "obsidian"
+install_method    = "github-release"
+installed_at      = "2026-05-25T01:48:52Z"
+installed_version = "v1.12.7"
+installed_sha256  = "f6d8b96fe685a8632c819cc093a248ace0f6bab410f44a6c929a2611b1ebb17c"
+install_path      = "/usr/local/bin/obsidian.AppImage"
+verified_by       = "sha256"
+manifest_pin_mode = "track-latest"

@@ -1,0 +1,12 @@
+{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DisableSystemAddonUpdate": true,
+    "DontCheckDefaultBrowser": true,
+    "UserMessaging": {
+      "SkipOnboarding": true,
+      "WhatsNew": false
+    }
+  }
+}

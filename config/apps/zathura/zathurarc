@@ -1,0 +1,26 @@
+# Privacy-hardened zathura config.
+#
+# Sandboxing
+set sandbox strict
+
+# Clipboard behaviour — only PRIMARY (middle-click); never auto-fill the
+# selection clipboard with the entire visible text.
+set selection-clipboard primary
+
+# Layout / UX
+set adjust-open width
+set window-title-basename true
+set statusbar-h-padding 0
+set statusbar-v-padding 0
+
+# Disable any remote-resource loading in PDFs.  zathura with MuPDF backend
+# refuses these by default; the explicit settings document intent.
+set incremental-search true
+set abort-clear-search true
+
+# Render font hints — purely cosmetic; no privacy/security impact.
+set font "monospace 10"
+
+# Default mode — "follow" mode requires explicit keybinding (no auto-jump
+# on clicks anywhere in the document).
+set guioptions ""

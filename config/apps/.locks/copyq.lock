@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "copyq"
+install_method    = "apt"
+installed_at      = "2026-05-24T16:50:26Z"
+installed_version = "10.0.0-1"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "apt-archive"
+manifest_pin_mode = "track-latest"

@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "rage"
+install_method    = "direct-deb"
+installed_at      = "2026-05-25T01:48:25Z"
+installed_version = "0.11.2"
+installed_sha256  = "6cb7f11483dd516af11f556090a5228a6fe8853c25633de21096eeff486c1a88"
+install_path      = ""
+verified_by       = "sha256"
+manifest_pin_mode = "frozen"

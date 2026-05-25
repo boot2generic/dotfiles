@@ -1,0 +1,52 @@
+# Microsoft VSCode extensions — one per line, installed via
+# `code --install-extension <id>` in the [[apps.hooks.post_install]] of
+# the `code` entry.
+#
+# This is the FULL list pulled from the user's existing MS VSCode install
+# (`code --list-extensions` on 2026-05-24).  Includes the
+# Microsoft-marketplace-only extensions (ms-python.*, ms-toolsai.*,
+# ms-vscode-remote.*, github.copilot-chat) that the VSCodium entry's
+# extensions.txt drops.
+#
+# Lines beginning with '#' are comments and ignored.
+# Empty lines are ignored.
+
+# Linting / formatting
+charliermarsh.ruff
+davidanson.vscode-markdownlint
+
+# Python tooling (Microsoft-licensed — MS marketplace only)
+ms-python.debugpy
+ms-python.isort
+ms-python.python
+ms-python.vscode-pylance
+ms-python.vscode-python-envs
+
+# Jupyter (Microsoft-licensed)
+ms-toolsai.jupyter
+ms-toolsai.jupyter-keymap
+ms-toolsai.jupyter-renderers
+ms-toolsai.vscode-jupyter-cell-tags
+ms-toolsai.vscode-jupyter-slideshow
+
+# Remote development (Microsoft-licensed)
+ms-vscode-remote.remote-containers
+ms-vscode-remote.remote-ssh
+ms-vscode-remote.remote-ssh-edit
+ms-vscode.remote-explorer
+
+# C/C++ (Microsoft-licensed)
+ms-vscode.cpptools
+ms-vscode.cpptools-themes
+
+# YAML / GitHub workflow
+redhat.vscode-yaml
+github.vscode-github-actions
+
+# GitHub Copilot Chat (proprietary, license required)
+github.copilot-chat
+
+# Themes / icons
+dracula-theme.theme-dracula
+pkief.material-icon-theme
+vscode-icons-team.vscode-icons
