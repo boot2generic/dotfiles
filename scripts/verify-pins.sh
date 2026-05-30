@@ -424,7 +424,12 @@ verify_entry() {
     #      are present AND we haven't already marked the entry bad.
     #      In track-latest mode the date is purely informational ("we
     #      last audited") so the same staleness threshold applies.
-    if [[ -n "$pin_last" && -n "$pin_refresh_days" ]]; then
+    # refresh_after_days is optional in the manifest; the schema documents
+    # a default of 90 when omitted.  Apply it here so an entry with a
+    # last_refreshed date but no explicit threshold still ages into "stale"
+    # rather than being silently exempt from the freshness check forever.
+    [[ -z "$pin_refresh_days" ]] && pin_refresh_days=90
+    if [[ -n "$pin_last" ]]; then
         local d
         d=$(days_since "$pin_last")
         RESULT_DAYS_OLD="$d"

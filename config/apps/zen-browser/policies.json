@@ -1,0 +1,122 @@
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+    "DisableFirefoxAccounts": false,
+    "DisableFormHistory": false,
+    "DontCheckDefaultBrowser": true,
+    "DisableSetDesktopBackground": true,
+    "DisableProfileImport": true,
+    "DisableProfileRefresh": true,
+    "DisableSystemAddonUpdate": true,
+    "DisableAppUpdate": true,
+    "AppAutoUpdate": false,
+    "ManualAppUpdateOnly": true,
+    "BackgroundAppUpdate": false,
+    "DisableDeveloperTools": false,
+    "DisablePrivateBrowsing": false,
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "FirefoxSuggest": {
+      "WebSuggestions": false,
+      "SponsoredSuggestions": false,
+      "ImproveSuggest": false,
+      "Locked": true
+    },
+    "EnableTrackingProtection": {
+      "Value": true,
+      "Locked": true,
+      "Cryptomining": true,
+      "Fingerprinting": true
+    },
+    "EncryptedMediaExtensions": {
+      "Enabled": true,
+      "Locked": false
+    },
+    "HttpsOnlyMode": "force_enabled",
+    "NetworkPrediction": false,
+    "NoDefaultBookmarks": true,
+    "OfferToSaveLogins": false,
+    "OfferToSaveLoginsDefault": false,
+    "PasswordManagerEnabled": false,
+    "Permissions": {
+      "Location": {
+        "BlockNewRequests": true,
+        "Locked": true
+      },
+      "Notifications": {
+        "BlockNewRequests": true,
+        "Locked": true
+      },
+      "Autoplay": {
+        "Default": "block-audio-video",
+        "Locked": true
+      }
+    },
+    "PopupBlocking": {
+      "Default": true,
+      "Locked": true
+    },
+    "PromptForDownloadLocation": true,
+    "SanitizeOnShutdown": {
+      "Cache": true,
+      "Cookies": false,
+      "Downloads": false,
+      "FormData": true,
+      "History": false,
+      "Sessions": false,
+      "SiteSettings": false,
+      "OfflineApps": true,
+      "Locked": false
+    },
+    "SearchEngines": {
+      "Default": "DuckDuckGo",
+      "PreventInstalls": false
+    },
+    "ShowHomeButton": false,
+    "UserMessaging": {
+      "WhatsNew": false,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "SkipOnboarding": true,
+      "MoreFromMozilla": false
+    },
+    "DNSOverHTTPS": {
+      "Enabled": false,
+      "Locked": true
+    },
+    "ExtensionSettings": {
+      "uBlock0@raymondhill.net": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi",
+        "default_area": "navbar"
+      },
+      "jid1-MnnxcxisBPnSXQ@jetpack": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/privacy-badger17/latest.xpi",
+        "default_area": "navbar"
+      },
+      "{74145f27-f039-47ce-a470-a662b129930a}": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/clearurls/latest.xpi",
+        "default_area": "navbar"
+      },
+      "jid1-BoFifL9Vbdl2zQ@jetpack": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/localcdn-fork-of-decentraleyes/latest.xpi",
+        "default_area": "navbar"
+      },
+      "keepassxc-browser@keepassxc.org": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/keepassxc-browser/latest.xpi",
+        "default_area": "navbar"
+      },
+      "*": {
+        "installation_mode": "blocked",
+        "blocked_install_message": "Extensions are managed by dotfiles policy"
+      }
+    }
+  }
+}

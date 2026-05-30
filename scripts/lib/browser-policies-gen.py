@@ -74,7 +74,7 @@ from pathlib import Path
 # generator run for it; the validator's allowlist behaviour is unchanged
 # (browser_extensions is meaningful for any app, but only the apps below
 # get a policies.json deploy path).
-KNOWN_BROWSERS = frozenset({"firefox-esr", "mullvad-browser"})
+KNOWN_BROWSERS = frozenset({"firefox-esr", "mullvad-browser", "zen-browser"})
 
 # Deny-by-default sentinel injected into every generated ExtensionSettings
 # block.  The Mozilla Policies spec recognises "*" as the catch-all key;

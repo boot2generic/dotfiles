@@ -1,0 +1,31 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Zen Browser
+GenericName=Web Browser
+Comment=Firefox-based browser with vertical tabs and focus mode
+# Exec runs the /usr/local/bin/zen-browser symlink (→ the AppImage) created
+# by the post_install hook.  MOZ_ENABLE_WAYLAND=1 is the crispness fix:
+# without it the browser renders through XWayland, which bitmap-scales the
+# UI on a Plasma Wayland session (blurry text on HiDPI / fractional-scaled
+# monitors).  With it, Zen renders natively on Wayland — sharp at any scale.
+# The var is harmless on X11/i3: Gecko falls back to X11 when there is no
+# WAYLAND_DISPLAY, so the one launcher works on both desktops.
+Exec=env MOZ_ENABLE_WAYLAND=1 zen-browser %u
+Icon=zen-browser
+# Matches the window class Zen sets (application.ini RemotingName=zen) so
+# running windows associate with this launcher / its taskbar pin.
+StartupWMClass=zen
+StartupNotify=true
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/mailto;
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=env MOZ_ENABLE_WAYLAND=1 zen-browser --new-window %u
+
+[Desktop Action new-private-window]
+Name=New Private Window
+Exec=env MOZ_ENABLE_WAYLAND=1 zen-browser --private-window %u

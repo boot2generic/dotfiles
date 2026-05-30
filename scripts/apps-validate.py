@@ -604,6 +604,7 @@ _DEST_SYSTEM_PREFIXES = (
     # Per-app configuration trees only.  No /etc top-level catch-all.
     "/etc/firefox-esr/",
     "/etc/mullvad-browser/",
+    "/etc/zen/",             # Zen Browser policies (RemotingName=zen)
     "/etc/thunderbird/",
     "/etc/skel/",            # user-template path; safe defaults for new users
     "/etc/dconf/db/site.d/", # site-wide GSettings overrides — Plasma/GTK

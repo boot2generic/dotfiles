@@ -4,12 +4,12 @@
 # Provisions the *current* machine with the full desktop stack — runs
 # locally, no SSH, no pexpect.  Two desktop paths:
 #
-#   • --desktop=i3      (default) — X11 + i3 + polybar + picom + rofi
+#   • --desktop=i3                — X11 + i3 + polybar + picom + rofi
 #                         + dunst + lightdm + pulseaudio.  The
 #                         original cyberpunk stack; behaviour is
 #                         byte-identical to pre-Plasma versions of
 #                         this script.
-#   • --desktop=plasma            — KDE Plasma 6 on Wayland + KWin
+#   • --desktop=plasma  (default) — KDE Plasma 6 on Wayland + KWin
 #                         + sddm + pipewire + konsole + dolphin +
 #                         kde-config-screenlocker.  Recommended on
 #                         physical desktops with NVIDIA + multi-
@@ -117,7 +117,7 @@
 #                                     install + deploy + validate.
 #                                     `--i3` and `--plasma` are
 #                                     shorthand for the same.  Default
-#                                     is i3.  Picking `plasma` swaps:
+#                                     is plasma.  Picking `i3` swaps:
 #                                       - apt set: plasma-desktop +
 #                                         kwin-wayland + sddm +
 #                                         pipewire + xwayland + …
@@ -296,8 +296,18 @@ detect_virt() {
   #   • hyperv   — Microsoft Hyper-V / Azure (special Xorg config needed)
   #   • vm       — any other virt (kvm/qemu/vmware/vbox/xen/lxc/…)
   #   • physical — bare metal (only category that uses GPU drivers)
+  # NOTE: systemd-detect-virt prints the type to stdout in ALL cases —
+  # including "none" on bare metal — but EXITS NON-ZERO (1) when it finds
+  # no virtualization.  So stdout is authoritative; the exit code is just a
+  # found/not-found boolean.  A `|| echo none` fallback here is a trap: it
+  # fires on the normal bare-metal exit-1 and appends a SECOND "none",
+  # yielding the two-line string "none\nnone" that matches neither `none)`
+  # nor `microsoft)` and falls through to `*) vm` — mislabeling physical
+  # hardware as a VM.  Capture stdout, swallow the exit code, default to
+  # "none" only when the output is genuinely empty (tool missing).
   local virt
-  virt="$(systemd-detect-virt 2>/dev/null || echo none)"
+  virt="$(systemd-detect-virt 2>/dev/null)" || true
+  virt="${virt:-none}"
   VM_HYPERVISOR="$virt"
   case "$virt" in
     microsoft) VIRT_TYPE="hyperv" ;;
@@ -418,7 +428,7 @@ print_hardware() {
   printf "    %-12s %s\n" "DMI product" "${DMI_PRODUCT:-unknown}"
   printf "    %-12s %s\n" "GPU vendor"  "$GPU_VENDOR"
   printf "    %-12s %s\n" "CPU vendor"  "${CPU_VENDOR:-unknown}"
-  printf "    %-12s %s\n" "Desktop"     "${DESKTOP:-i3}"
+  printf "    %-12s %s\n" "Desktop"     "${DESKTOP:-plasma}"
   if [[ -n "${GPU_RAW:-}" ]]; then
     while IFS= read -r line; do
       printf "    %-12s %s\n" "  PCI" "${line:0:90}"
@@ -509,7 +519,7 @@ BASE_PACKAGES=(
   python3-tomlkit  # for scripts/refresh-pins.sh format-preserving TOML edits
 )
 
-# DESKTOP_I3_PACKAGES — installed only when DESKTOP=i3 (default).
+# DESKTOP_I3_PACKAGES — installed only when DESKTOP=i3.
 # X11 server + WM + compositor + bar + launcher + notifications + DM +
 # lockscreen + file manager + pulseaudio audio stack.  Plasma users
 # don't get any of these — KWin/Plasma/sddm/dolphin/kscreenlocker
@@ -4067,11 +4077,11 @@ WANT_WIFI_TAKEOVER=1
 WANT_APPS=1     # 1 = run apps stage during setup (default-on); 0 = --no-apps opts out
 APPS_TIER=""   # empty = install all tiers; comma-list (e.g. "tier1,tier4") restricts
 APPS_DRY_RUN=0 # 1 = apps stage walks the pipeline without installing (--apps-dry-run)
-# Desktop stack selection.  Default is `i3` (the original cyberpunk
-# X11 stack — unchanged for existing users).  `plasma` switches the
-# install_phase + deploy_phase + validate_phase to KDE Plasma 6 on
-# Wayland with SDDM + PipeWire.  See readme/plasma.md.
-DESKTOP="i3"
+# Desktop stack selection.  Default is `plasma` (KDE Plasma 6 on Wayland
+# with SDDM + PipeWire).  `i3` selects the original cyberpunk X11 stack
+# (i3 + polybar + picom + rofi) — still fully supported, just no longer
+# the default; pass `--desktop=i3` for it.  See readme/plasma.md.
+DESKTOP="plasma"
 # Default for `setup` is INTERACTIVE.  If stdin isn't a TTY (piped, SSH
 # without -t, CI), we silently flip to bypass — otherwise read would hang
 # the entire pipeline waiting for input that's never coming.

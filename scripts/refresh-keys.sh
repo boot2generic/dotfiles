@@ -95,7 +95,7 @@ INSTALL_METHOD="$(read_field install.method)"
 KEY_URL="$(read_field install.apt_pinned_repo.key_url)"
 KEY_FP_PINNED="$(read_field install.apt_pinned_repo.key_fingerprint)"
 KEYRING_FILE="$(read_field install.apt_pinned_repo.keyring_file)"
-DOCS_URL="$(read_field meta.docs_url)"
+DOCS_URL="$(read_field docs_url)"
 
 if [[ "$INSTALL_METHOD" != "apt-pinned-repo" ]]; then
     die "${APP}: install.method is '${INSTALL_METHOD}', refresh-keys.sh only handles apt-pinned-repo"

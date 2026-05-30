@@ -413,14 +413,15 @@ mode        = "force_installed"
 
 
 [[apps]]
-# flameshot — Screenshot tool with annotation; targets i3 only because
-# Plasma installs `spectacle` instead.  Cloud upload disabled by default.
+# flameshot — Screenshot tool with annotation.  Installed everywhere
+# ("common") alongside spectacle; user apps ship regardless of desktop
+# environment or form factor.  Cloud upload disabled by default.
 # Trust path: stock Debian apt.
 # Pin mode: track-latest.
 name         = "flameshot"
 display_name = "Flameshot (screenshot)"
 tier         = 4
-machines     = ["i3"]
+machines     = ["common"]
 description  = "Screenshot tool with annotation; local-save only (no cloud upload by default)."
 docs_url     = "https://flameshot.org/"
 
@@ -463,15 +464,17 @@ refresh_after_days = 90
 
 
 [[apps]]
-# mupdf — Minimal PDF viewer for i3.  Launch with `mupdf -X <file>` for
+# mupdf — Minimal PDF viewer.  Launch with `mupdf -X <file>` for
 # untrusted PDFs (disables JavaScript + form submission).  See
 # config/apps/mupdf/_PROFILE.md for the recommended invocation wrapper.
+# Installed everywhere ("common") — user apps ship regardless of desktop
+# environment or form factor.
 # Trust path: stock Debian apt.
 # Pin mode: track-latest.
 name         = "mupdf"
 display_name = "MuPDF"
 tier         = 4
-machines     = ["i3"]
+machines     = ["common"]
 description  = "Minimal PDF viewer; configured to launch with --no-js for safer untrusted PDFs."
 docs_url     = "https://mupdf.com/"
 
@@ -485,15 +488,17 @@ refresh_after_days = 90
 
 
 [[apps]]
-# okular — KDE PDF viewer (Plasma stack).  JavaScript-in-PDF disabled,
-# no remote-resource fetch.  Deployed alongside spectacle for the
-# screenshot side of the Plasma session.
+# okular — KDE PDF viewer.  JavaScript-in-PDF disabled, no remote-resource
+# fetch.  Installed everywhere ("common") — user apps ship regardless of
+# desktop environment or form factor (pulls a slice of KDE/Qt libs on
+# non-Plasma machines, which is acceptable per the install-everywhere
+# policy).
 # Trust path: stock Debian apt.
 # Pin mode: track-latest.
 name         = "okular"
 display_name = "Okular (PDF viewer)"
 tier         = 4
-machines     = ["plasma"]
+machines     = ["common"]
 description  = "KDE PDF viewer; JavaScript-in-PDF disabled, no remote-resource fetch."
 docs_url     = "https://okular.kde.org/"
 
@@ -512,14 +517,16 @@ overlay = true
 
 
 [[apps]]
-# spectacle — KDE screenshot tool.  Local save only.  Plasma-only;
-# Flameshot handles the i3 side.
+# spectacle — KDE screenshot tool.  Local save only.  Installed everywhere
+# ("common") alongside flameshot — user apps ship regardless of desktop
+# environment or form factor (pulls a slice of KDE/Qt libs on non-Plasma
+# machines, which is acceptable per the install-everywhere policy).
 # Trust path: stock Debian apt.
 # Pin mode: track-latest.
 name         = "spectacle"
 display_name = "Spectacle (screenshot)"
 tier         = 4
-machines     = ["plasma"]
+machines     = ["common"]
 description  = "KDE screenshot tool; local save by default."
 docs_url     = "https://apps.kde.org/spectacle/"
 
@@ -583,14 +590,15 @@ overlay = false
 
 
 [[apps]]
-# zathura — Minimal keyboard-driven PDF viewer for i3.  Set with strict
-# sandboxing.
+# zathura — Minimal keyboard-driven PDF viewer.  Set with strict
+# sandboxing.  Installed everywhere ("common") — user apps ship regardless
+# of desktop environment or form factor.
 # Trust path: stock Debian apt.
 # Pin mode: track-latest.
 name         = "zathura"
 display_name = "Zathura (PDF viewer)"
 tier         = 4
-machines     = ["i3"]
+machines     = ["common"]
 description  = "Minimal keyboard-driven PDF viewer; sandboxed (set sandbox strict)."
 docs_url     = "https://pwmt.org/projects/zathura/"
 
@@ -1124,3 +1132,112 @@ refresh_after_days = 90
 [[apps.hooks.post_install]]
 description = "symlink /usr/local/bin/obsidian → obsidian.AppImage + chmod +x AppImage"
 command     = "sudo chmod +x /usr/local/bin/obsidian.AppImage && sudo ln -sf /usr/local/bin/obsidian.AppImage /usr/local/bin/obsidian"
+
+
+[[apps]]
+# zen-browser — Firefox-based browser with a vertical tab bar and focus
+# mode.  Installed on every machine ("common") — the "daily driver with
+# strong tab management" niche, alongside firefox-esr + mullvad-browser.
+#
+# Distributed as an AppImage on GitHub (zen-browser/desktop); no GPG
+# signing on releases so the only integrity check is the manifest sha256
+# + HTTPS-to-GitHub.  Refresh quarterly (or when upstream cuts a stable
+# release) with `./scripts/apps-cli.sh refresh --app zen-browser`.
+#
+# Trust path: HTTPS to GitHub Releases (no signature) + manifest sha256 pin.
+# Pin mode: frozen — version + sha256 carried in the manifest.
+name         = "zen-browser"
+display_name = "Zen Browser"
+tier         = 1
+machines     = ["common"]
+description  = "Firefox-based browser with vertical tabs and focus mode; privacy-oriented daily driver."
+docs_url     = "https://zen-browser.app/"
+
+[apps.install]
+method = "github-release"
+
+[apps.install.github_release]
+repo            = "zen-browser/desktop"
+asset_pattern   = "zen-{arch}.AppImage"
+install_to      = "/usr/local/bin/zen-browser.AppImage"
+version         = "1.20.1b"
+sha256_x86_64   = "df72284827c412df9ec2bbe61e24c5bb72ba83256990565876c5db45aba89108"
+sha256_aarch64  = "c7f8624c4fe57f50d94718a92897c4ad2b9ca9bad69554d574309cff1d03ce9d"
+gpg_fingerprint = ""
+extract_path    = ""
+
+[apps.pin]
+mode               = "frozen"
+last_refreshed     = "2026-05-29"
+refresh_after_days = 30
+
+# policies.json is fully regenerated by browser-policies-gen.py from
+# policies.json.base + the browser_extensions list below (same mechanism
+# as firefox-esr / mullvad-browser).  Deployed to /etc/zen/policies/ —
+# Zen reports application.ini RemotingName=zen, so the Firefox-fork system
+# policy path is /etc/zen/policies/policies.json.  overlay=false: the file
+# is generator-owned, always overwritten.
+[apps.configs."/etc/zen/policies/policies.json"]
+source  = "policies.json"
+mode    = "0644"
+overlay = false
+
+# Desktop launcher (carries the MOZ_ENABLE_WAYLAND=1 crispness fix) +
+# matching icon, deployed to the per-user data dirs (no sudo).  The
+# launcher is what the Plasma taskbar pin in config/plasma/apply-theme.sh
+# references by desktop-file id.
+[apps.configs."${HOME}/.local/share/applications/zen-browser.desktop"]
+source  = "zen-browser.desktop"
+mode    = "0644"
+overlay = true
+
+[apps.configs."${HOME}/.local/share/icons/hicolor/128x128/apps/zen-browser.png"]
+source  = "zen-browser.png"
+mode    = "0644"
+overlay = false
+
+[[apps.hooks.pre_install]]
+description = "regenerate zen-browser policies.json from base + browser_extensions"
+command     = "{app_dir}/../../../scripts/lib/browser-policies-gen.py --app zen-browser --root {app_dir}/../../.."
+
+[[apps.hooks.post_install]]
+description = "chmod +x the AppImage and symlink /usr/local/bin/zen-browser → zen-browser.AppImage"
+command     = "sudo chmod +x /usr/local/bin/zen-browser.AppImage && sudo ln -sf /usr/local/bin/zen-browser.AppImage /usr/local/bin/zen-browser"
+
+[[apps.hooks.post_install]]
+description = "refresh the user desktop-file database so the Zen launcher registers"
+command     = "update-desktop-database \"${HOME}/.local/share/applications\" 2>/dev/null || true"
+
+# Force-installed privacy/security add-ons (mirrors the firefox-esr set).
+# Note: "HTTPS Everywhere" is intentionally NOT here — EFF retired it in
+# 2022 because its job is now built into the browser; we enable that via
+# "HttpsOnlyMode": "force_enabled" in policies.json.base instead.
+[[apps.browser_extensions]]
+name        = "uBlock Origin"
+guid        = "uBlock0@raymondhill.net"
+amo_slug    = "ublock-origin"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "Privacy Badger"
+guid        = "jid1-MnnxcxisBPnSXQ@jetpack"
+amo_slug    = "privacy-badger17"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "ClearURLs"
+guid        = "{74145f27-f039-47ce-a470-a662b129930a}"
+amo_slug    = "clearurls"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "LocalCDN"
+guid        = "jid1-BoFifL9Vbdl2zQ@jetpack"
+amo_slug    = "localcdn-fork-of-decentraleyes"
+mode        = "force_installed"
+
+[[apps.browser_extensions]]
+name        = "KeePassXC-Browser"
+guid        = "keepassxc-browser@keepassxc.org"
+amo_slug    = "keepassxc-browser"
+mode        = "force_installed"

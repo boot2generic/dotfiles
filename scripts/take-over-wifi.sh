@@ -300,10 +300,13 @@ esac
 
 # ── Pre-flight: are we about to drop the network we're using? ──────
 ETH_UP=0
-while IFS= read -r line; do
-    [[ "$line" =~ ^[a-z]+[0-9]+f[0-9]+:[[:space:]]+UP ]] && ETH_UP=1
-    [[ "$line" =~ ^en[a-z]+[0-9]+:[[:space:]]+UP ]]      && ETH_UP=1
-    [[ "$line" =~ ^enx[0-9a-f]+:[[:space:]]+UP ]]        && ETH_UP=1
+# `ip -br link` emits "NAME<spaces>STATE<spaces>..." with NO colon, e.g.
+#   enp0s31f6    UP    90:2e:16:47:03:a7 <...>
+# Match the operational state in field 2 against any ethernet-named iface
+# (predictable names start with `en`; legacy with `eth`).  wlan names
+# start with `wl` so they can't false-match.
+while read -r ifname state _; do
+    [[ "$state" == "UP" && "$ifname" =~ ^(en|eth) ]] && ETH_UP=1
 done <<<"$(ip -br link 2>/dev/null || true)"
 
 echo

@@ -486,6 +486,92 @@ for h in hooks:
 }
 
 # ============================================================
+# Deploy [apps.configs] files
+# ============================================================
+# Copies each declared config source → dest with the requested mode.
+# The validator (apps-validate.py _check_configs / _check_dest_allowlist)
+# is the trust chokepoint: it has already confirmed the source exists and
+# the dest matches the explicit prefix allowlist (no /etc top-level
+# catch-all, no traversal).  We therefore deploy without re-deriving trust
+# here — but we still resolve paths defensively.
+#
+# Source selection mirrors schema.toml's `overlay` semantics: when
+# overlay = true and a per-machine override exists at
+# ~/.config/dotfiles-local/<name>/<basename>, that file wins over the
+# in-repo source.  overlay = false (or absent) always uses the repo copy.
+#
+# Dest paths support ${HOME} / $HOME / leading ~ expansion (the manifest
+# stores them literally so the same entry works for any user).  A dest
+# under the user's HOME is written without sudo; any other absolute path
+# is a system file and goes through `sudo install -D`.
+deploy_configs() {
+  local json="$1" name="$2" app_dir="$3"
+  local tsv
+  # Emit one TSV row per config: dest<TAB>source<TAB>mode<TAB>overlay(0|1).
+  tsv="$(python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+cfg = data.get("configs", {})
+if isinstance(cfg, dict):
+    for dest, spec in cfg.items():
+        if not isinstance(spec, dict):
+            continue
+        src  = spec.get("source", "")
+        mode = spec.get("mode", "0644")
+        ov   = "1" if spec.get("overlay") else "0"
+        print("\t".join((str(dest), str(src), str(mode), ov)))
+' "$json")" || { err "${name}: could not parse configs table"; return 1; }
+  [[ -z "$tsv" ]] && return 0
+
+  local dest source mode overlay src dst base ov
+  while IFS=$'\t' read -r dest source mode overlay; do
+    [[ -n "$dest" && -n "$source" ]] || continue
+
+    # ── source selection (overlay → dotfiles-local override wins) ──
+    src="${app_dir}/${source}"
+    if [[ "$overlay" == "1" ]]; then
+      base="$(basename "$source")"
+      ov="${HOME}/.config/dotfiles-local/${name}/${base}"
+      [[ -r "$ov" ]] && src="$ov"
+    fi
+    if [[ ! -r "$src" ]]; then
+      err "${name}: config source not readable: $src"
+      return 1
+    fi
+
+    # ── dest expansion (${HOME} / $HOME / leading ~) ──
+    dst="$dest"
+    dst="${dst/#\~\//${HOME}/}"
+    dst="${dst//\$\{HOME\}/$HOME}"
+    dst="${dst//\$HOME/$HOME}"
+
+    if (( DRY_RUN )); then
+      if [[ "$dst" == "$HOME"/* ]]; then
+        log "config: would install -m ${mode} ${src} → ${dst}"
+      else
+        log "config: would sudo install -m ${mode} ${src} → ${dst}"
+      fi
+      continue
+    fi
+
+    # ── deploy: user-home paths need no sudo; system paths do ──
+    if [[ "$dst" == "$HOME"/* ]]; then
+      if ! install -D -m "$mode" "$src" "$dst"; then
+        err "${name}: failed to deploy config → ${dst}"
+        return 1
+      fi
+    else
+      if ! sudo install -D -m "$mode" "$src" "$dst"; then
+        err "${name}: failed to deploy config → ${dst} (sudo)"
+        return 1
+      fi
+    fi
+    log "config: deployed ${dst} (mode ${mode})"
+  done <<<"$tsv"
+  return 0
+}
+
+# ============================================================
 # Install one entry
 # ============================================================
 # Args: <source file path> <entry index in file> <schema-v2 entry json>
@@ -626,6 +712,16 @@ install_one() {
 
   if (( adapter_rc != 0 )); then
     err "${name}: adapter ${adapter} exited $adapter_rc"
+    return 1
+  fi
+
+  # Deploy [apps.configs] files (source → dest).  Runs AFTER the adapter
+  # (so the binary exists) and BEFORE post_install hooks (so hooks can act
+  # on deployed files, e.g. update-desktop-database).  Runs on every
+  # targeted install — including the already-installed short-circuit — so
+  # re-running picks up regenerated policies / updated dotfiles.
+  if ! deploy_configs "$legacy_json" "$name" "$app_dir"; then
+    err "${name}: config deploy failed"
     return 1
   fi
 

@@ -36,9 +36,10 @@ set -u
 
 WALLPAPER="${HOME}/.config/wallpaper/wallpaper.png"
 SCHEME="CyberpunkCyan"
-PANEL_HEIGHT="${PANEL_HEIGHT:-40}"           # px; taller = more modern, easier hit targets
-PANEL_HIDING="${PANEL_HIDING:-autohide}"     # autohide|none|dodgewindows|windowsbelow
+PANEL_HEIGHT="${PANEL_HEIGHT:-36}"           # px; slim dock — contents scale to fit (clock font tracks this)
+PANEL_HIDING="${PANEL_HIDING:-none}"         # autohide|none|dodgewindows|windowsbelow — none = always-visible floating dock
 PANEL_FLOATING="${PANEL_FLOATING:-true}"     # true = floating pill style (Plasma 6 feature)
+PANEL_OPACITY="${PANEL_OPACITY:-2}"          # PanelView opacity enum: 0=adaptive 1=opaque 2=translucent
 DEFAULT_SCALE="${DEFAULT_SCALE:-1}"          # 100% = 1, 125% = 1.25, …
 
 # ── Env-var whitelist ──────────────────────────────────────────────
@@ -65,6 +66,13 @@ case "$PANEL_FLOATING" in
     true|false) : ;;
     *)
         echo "[!]  PANEL_FLOATING='$PANEL_FLOATING' invalid — must be true or false" >&2
+        exit 2
+        ;;
+esac
+case "$PANEL_OPACITY" in
+    0|1|2) : ;;
+    *)
+        echo "[!]  PANEL_OPACITY='$PANEL_OPACITY' invalid — must be 0 (adaptive), 1 (opaque), or 2 (translucent)" >&2
         exit 2
         ;;
 esac
@@ -427,62 +435,110 @@ if pgrep -x plasmashell >/dev/null 2>&1; then
         # silently no-ops on any panel that isn't a horizontal/vertical
         # containment.
         #
-        # Widget changes performed (all idempotent):
-        #   1. Swap org.kde.plasma.taskmanager → org.kde.plasma.icontasks
-        #      (dock-style icons-only task manager — modern pill look).
-        #      Records the old widget's index, removes it, inserts the
-        #      new widget at the same index so the panel layout stays
-        #      intact.  Skips if icontasks is already present.
-        #   2. Add org.kde.plasma.battery as a top-level panel applet —
-        #      always visible, separate from the systray's auto-hidden
-        #      battery icon.  No-op on a desktop (shows AC adapter icon).
+        # Builds a centered, frosted icon-dock by REBUILDING the panel in
+        # left-to-right order.  Why rebuild instead of reorder-in-place:
+        # in Plasma 6.3 `widget.index` reads -1 and assigning it does NOT
+        # move the widget — so any insert-at-index logic silently dumps new
+        # widgets at the end (verified live).  `panel.addWidget()` appends,
+        # and append-order IS the visual order, so we wipe every widget and
+        # re-add in the exact sequence we want.  Deterministic + idempotent:
+        # every run yields the identical layout (this is a MANAGED panel —
+        # manual widget tweaks get reset on the next apply-theme run).
+        #
+        # Final layout (left → right):
+        #   kickoff │ «expanding spacer» │ icon-tasks (+pinned dock) │
+        #   «expanding spacer» │ system-monitor │ system-tray │ battery │ clock
+        #
+        # opacity: Plasma-6 panel opacity is READ-ONLY via scripting (stays
+        # "adaptive"), so we don't set it here — "adaptive" already renders
+        # translucent + KWin-blurred whenever no window is maximized behind
+        # the floating dock.  For ALWAYS-translucent: panel Edit Mode →
+        # Opacity → Translucent (one-time, can't be scripted).
+        #
+        # Verified live on plasmashell 6.3.6 (Wayland).
         script="$(cat <<EOF
+// Curated dock launchers — desktop-file ids verified present on the box.
+var DOCK = [
+    "applications:firefox-esr.desktop",
+    "applications:zen-browser.desktop",
+    "applications:mullvad-browser.desktop",
+    "applications:org.kde.dolphin.desktop",
+    "applications:org.keepassxc.KeePassXC.desktop",
+    "applications:org.kde.konsole.desktop"
+];
+
 var allPanels = panels();
 for (var i = 0; i < allPanels.length; ++i) {
     var p = allPanels[i];
+    // Only manage horizontal taskbars (a vertical/secondary panel, if the
+    // user ever adds one, is left untouched).
+    if (p.location !== "bottom" && p.location !== "top") { continue; }
+
     p.height = ${PANEL_HEIGHT};
     p.hiding = "${PANEL_HIDING}";
     p.floating = ${PANEL_FLOATING};
 
+    // ── clean slate: remove every widget, re-add in visual order ──
     var ids = p.widgetIds;
-
-    // ── 1. icons-only task manager swap ──────────────────────────
-    var _taskIdx = -1, _taskId = -1, _hasIconTasks = false;
     for (var j = 0; j < ids.length; ++j) {
         var w = p.widgetById(ids[j]);
-        if (w && w.type === "org.kde.plasma.taskmanager") {
-            _taskIdx = w.index; _taskId = ids[j];
-        }
-        if (w && w.type === "org.kde.plasma.icontasks") {
-            _hasIconTasks = true;
-        }
-    }
-    if (!_hasIconTasks && _taskId >= 0) {
-        p.widgetById(_taskId).remove();
-        var _it = p.addWidget("org.kde.plasma.icontasks");
-        if (_it && _taskIdx >= 0) { _it.index = _taskIdx; }
+        if (w) { w.remove(); }
     }
 
-    // ── 2. always-visible battery widget ─────────────────────────
-    // Re-fetch widgetIds — the task manager swap above may have changed
-    // the live widget list, making the original `ids` snapshot stale.
-    ids = p.widgetIds;
-    var hasBattery = false;
-    for (var j = 0; j < ids.length; ++j) {
-        var w = p.widgetById(ids[j]);
-        if (w && w.type === "org.kde.plasma.battery") {
-            hasBattery = true;
-            break;
-        }
-    }
-    if (!hasBattery) {
-        p.addWidget("org.kde.plasma.battery");
-    }
+    // left: application launcher
+    p.addWidget("org.kde.plasma.kickoff");
+
+    // expanding spacer → pushes the task cluster toward centre
+    var spL = p.addWidget("org.kde.plasma.panelspacer");
+    spL.currentConfigGroup = ["General"];
+    spL.writeConfig("expanding", true);
+    spL.reloadConfig();
+
+    // centred icons-only task manager + curated pinned launchers
+    var tasks = p.addWidget("org.kde.plasma.icontasks");
+    tasks.currentConfigGroup = ["General"];
+    tasks.writeConfig("launchers", DOCK.join(","));
+    tasks.writeConfig("maxStripes", 1);            // single row
+    tasks.writeConfig("groupingStrategy", 1);      // group by program
+    tasks.writeConfig("indicateAudioStreams", true);
+    tasks.writeConfig("showOnlyCurrentScreen", false);
+    tasks.reloadConfig();
+
+    // right-side expanding spacer (mirrors the left → tasks stay centred)
+    var spR = p.addWidget("org.kde.plasma.panelspacer");
+    spR.currentConfigGroup = ["General"];
+    spR.writeConfig("expanding", true);
+    spR.reloadConfig();
+
+    // right cluster: CPU/RAM meter, system tray, battery, clock
+    var sm = p.addWidget("org.kde.plasma.systemmonitor");
+    sm.currentConfigGroup = ["Appearance"];
+    sm.writeConfig("chartFace", "org.kde.ksysguard.linechart");
+    sm.writeConfig("title", "");
+    sm.currentConfigGroup = ["Sensors"];
+    sm.writeConfig("highPrioritySensorIds", '["cpu/all/usage","memory/physical/usedPercent"]');
+    sm.reloadConfig();
+
+    p.addWidget("org.kde.plasma.systemtray");
+    p.addWidget("org.kde.plasma.battery");
+
+    var clock = p.addWidget("org.kde.plasma.digitalclock");
+    clock.currentConfigGroup = ["Appearance"];
+    clock.writeConfig("use24hFormat", 2);          // force 24-hour
+    clock.writeConfig("showDate", true);
+    clock.writeConfig("dateFormat", "isoDate");
+    clock.writeConfig("dateDisplayFormat", "BelowTime");
+    clock.writeConfig("autoFontAndSize", false);
+    clock.writeConfig("fontFamily", "JetBrainsMono Nerd Font");
+    clock.writeConfig("fontWeight", 700);
+    clock.writeConfig("fontStyleName", "Bold");
+    clock.writeConfig("fontSize", 7);     // scaled for the 36px slim panel
+    clock.reloadConfig();
 }
 EOF
         )"
         if "$qdbus_bin" org.kde.plasmashell /PlasmaShell evaluateScript "$script" >/dev/null 2>&1; then
-            echo "[ok] panel: height=${PANEL_HEIGHT}px hiding=${PANEL_HIDING} floating=${PANEL_FLOATING} (+battery)"
+            echo "[ok] panel: height=${PANEL_HEIGHT}px hiding=${PANEL_HIDING} floating=${PANEL_FLOATING} (centered dock + launchers + battery + sysmon + clock)"
         else
             echo "[!]  plasmashell evaluateScript failed (panel geometry unchanged)"
         fi
@@ -491,6 +547,62 @@ EOF
     fi
 else
     echo "[*]  plasmashell not running — panel geometry will apply on next login"
+fi
+
+# ───────────────────────────────────────────────────────────────────
+# Panel opacity — force translucent (PANEL_OPACITY=2) so the floating
+# dock renders frosted-glass with the KWin blur (enabled in kwinrc).
+#
+# WHY this is separate from the panel-build script above: opacity is a
+# PanelView (C++) setting stored in ~/.config/plasmashellrc under
+# [PlasmaViews][Panel <id>] panelOpacity (int enum: 0=adaptive 1=opaque
+# 2=translucent) — NOT in the appletsrc, and the Plasma scripting API
+# exposes panel.opacity READ-ONLY (assigning it is a no-op; verified on
+# plasmashell 6.3.6).  The only way to set it is to write the key and let
+# PanelView re-read it at startup, which needs a plasmashell restart.
+#
+# Idempotent + cheap: we only restart when a panel's value actually
+# differs.  Writes happen while plasmashell is STOPPED so its on-exit
+# config flush can't race us (it would otherwise re-persist the old value).
+# ───────────────────────────────────────────────────────────────────
+psrc="${HOME}/.config/plasmashellrc"
+if [[ -f "$psrc" ]] && have kwriteconfig6; then
+    mapfile -t _panel_ids < <(grep -oE '^\[PlasmaViews\]\[Panel [0-9]+\]$' "$psrc" 2>/dev/null \
+        | grep -oE '[0-9]+' | sort -u)
+    if (( ${#_panel_ids[@]} == 0 )); then
+        echo "[*]  no panel views in plasmashellrc yet — opacity applies once a panel exists"
+    else
+        _need_change=0
+        for _id in "${_panel_ids[@]}"; do
+            _cur="$(kreadconfig6 --file plasmashellrc --group PlasmaViews \
+                    --group "Panel ${_id}" --key panelOpacity 2>/dev/null || echo)"
+            [[ "$_cur" == "$PANEL_OPACITY" ]] || _need_change=1
+        done
+        if (( _need_change == 0 )); then
+            echo "[ok] panel opacity already = ${PANEL_OPACITY}"
+        else
+            _restart=0
+            if pgrep -x plasmashell >/dev/null 2>&1 \
+               && systemctl --user is-active --quiet plasma-plasmashell.service 2>/dev/null; then
+                systemctl --user stop plasma-plasmashell.service 2>/dev/null && _restart=1
+            fi
+            for _id in "${_panel_ids[@]}"; do
+                # Write to the panel group AND its [Defaults] per-screen
+                # subgroup — PanelView reads opacity from one of them
+                # depending on version; writing both is harmless and robust.
+                kwriteconfig6 --file plasmashellrc --group PlasmaViews \
+                    --group "Panel ${_id}" --key panelOpacity "$PANEL_OPACITY"
+                kwriteconfig6 --file plasmashellrc --group PlasmaViews \
+                    --group "Panel ${_id}" --group Defaults --key panelOpacity "$PANEL_OPACITY"
+            done
+            if (( _restart )); then
+                systemctl --user start plasma-plasmashell.service 2>/dev/null || true
+                echo "[ok] panel opacity → ${PANEL_OPACITY} (plasmashell restarted to apply)"
+            else
+                echo "[ok] panel opacity → ${PANEL_OPACITY} (applies on next plasmashell start)"
+            fi
+        fi
+    fi
 fi
 
 # ───────────────────────────────────────────────────────────────────

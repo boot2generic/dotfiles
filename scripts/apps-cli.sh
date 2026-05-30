@@ -591,7 +591,7 @@ _ensure_jq() {
     err "apt-get install jq failed — install manually and retry"
     return 1
   fi
-  ok "jq installed"
+  log "jq installed"
   return 0
 }
 
