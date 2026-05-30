@@ -447,7 +447,8 @@ if pgrep -x plasmashell >/dev/null 2>&1; then
         #
         # Final layout (left → right):
         #   kickoff │ «expanding spacer» │ icon-tasks (+pinned dock) │
-        #   «expanding spacer» │ system-monitor │ system-tray │ battery │ clock
+        #   «expanding spacer» │ system-monitor │ system-tray │ clock
+        #   (battery shows inside the system tray — no standalone widget)
         #
         # opacity: Plasma-6 panel opacity is READ-ONLY via scripting (stays
         # "adaptive"), so we don't set it here — "adaptive" already renders
@@ -519,8 +520,9 @@ for (var i = 0; i < allPanels.length; ++i) {
     sm.writeConfig("highPrioritySensorIds", '["cpu/all/usage","memory/physical/usedPercent"]');
     sm.reloadConfig();
 
+    // System tray already provides a battery icon, so we do NOT add a
+    // standalone battery widget here (that produced two battery icons).
     p.addWidget("org.kde.plasma.systemtray");
-    p.addWidget("org.kde.plasma.battery");
 
     var clock = p.addWidget("org.kde.plasma.digitalclock");
     clock.currentConfigGroup = ["Appearance"];
