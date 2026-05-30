@@ -1,0 +1,14 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "dotfiles"
+            }
+        ],
+        "Description": "Breeze-dark with a frosted-glass translucent panel (cyberpunk dotfiles).",
+        "Id": "cyberpunk-glass",
+        "Name": "Cyberpunk Glass",
+        "Version": "1.0"
+    },
+    "X-Plasma-API": "5.0"
+}

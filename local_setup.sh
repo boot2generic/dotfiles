@@ -2458,6 +2458,19 @@ deploy_phase() {
       install -D -m 0755 "${plasma_src}/apply-theme.sh" \
         "${HOME}/.config/plasma/apply-theme.sh"
       ok ".config/plasma/apply-theme.sh"
+      # cyberpunk-glass custom desktop theme — frosted-glass panel
+      # background.  Deployed NEXT TO apply-theme.sh so the script can
+      # locate it (it then installs it into ~/.local/share/plasma/
+      # desktoptheme/ and runs plasma-apply-desktoptheme).  install -D
+      # creates the nested widgets/ + translucent/widgets/ dirs.
+      for tf in metadata.json widgets/panel-background.svg \
+                translucent/widgets/panel-background.svg; do
+        if [[ -f "${plasma_src}/desktoptheme/cyberpunk-glass/${tf}" ]]; then
+          install -D -m 0644 "${plasma_src}/desktoptheme/cyberpunk-glass/${tf}" \
+            "${HOME}/.config/plasma/desktoptheme/cyberpunk-glass/${tf}"
+        fi
+      done
+      ok ".config/plasma/desktoptheme/cyberpunk-glass/"
       # kga_push.py — Python helper that apply-theme.sh invokes to
       # push every kglobalaccel binding over a SINGLE D-Bus session
       # connection.  Replaces the previous 17-sequential-dbus-send

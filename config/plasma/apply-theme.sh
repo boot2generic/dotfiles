@@ -34,8 +34,14 @@
 
 set -u
 
+# Directory this script lives in — used to locate the bundled custom
+# desktop theme (desktoptheme/cyberpunk-glass/) next to it, whether run
+# from the repo (config/plasma/) or the deployed copy (~/.config/plasma/).
+_SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 WALLPAPER="${HOME}/.config/wallpaper/wallpaper.png"
 SCHEME="CyberpunkCyan"
+DESKTOP_THEME="${DESKTOP_THEME:-cyberpunk-glass}"   # frosted-glass panel; falls back to breeze-dark if files missing
 PANEL_HEIGHT="${PANEL_HEIGHT:-36}"           # px; slim dock — contents scale to fit (clock font tracks this)
 PANEL_HIDING="${PANEL_HIDING:-none}"         # autohide|none|dodgewindows|windowsbelow — none = always-visible floating dock
 PANEL_FLOATING="${PANEL_FLOATING:-true}"     # true = floating pill style (Plasma 6 feature)
@@ -306,11 +312,40 @@ if have plasma-apply-wallpaperimage && [[ -f "$WALLPAPER" ]]; then
     fi
 fi
 
-# Default Plasma desktop theme (panel/tray styling) — breeze-dark
-# inherits our color scheme cleanly.  plasma-apply-desktoptheme is
-# version-stable across Plasma 6.x.
+# Plasma desktop theme (panel/tray styling).  We ship a custom theme,
+# "cyberpunk-glass": it inherits Breeze for everything EXCEPT the panel
+# background, which it overrides with a frosted-glass (semi-transparent)
+# SVG so the floating dock reads as translucent (Breeze's own "Translucent"
+# mode is too subtle to see over a dark wallpaper).  Colors still come from
+# the CyberpunkCyan scheme via currentColor, so it stays on-theme.
+#
+# Install the bundled theme into the user theme dir, then apply it.  If the
+# theme files aren't present (e.g. script run in isolation), fall back to
+# breeze-dark so we never leave the session themeless.
+_theme_src="${_SELF_DIR}/desktoptheme/${DESKTOP_THEME}"
+_theme_dst="${HOME}/.local/share/plasma/desktoptheme/${DESKTOP_THEME}"
 if have plasma-apply-desktoptheme; then
-    plasma-apply-desktoptheme breeze-dark >/dev/null 2>&1 || true
+    if [[ -f "${_theme_src}/metadata.json" ]]; then
+        # Deploy/refresh the theme files.  If anything changed, drop the
+        # rendered-SVG cache so plasmashell re-rasterises the new panel
+        # background (KImageCache keys per-theme and won't notice an
+        # in-place SVG edit otherwise).
+        _theme_changed=0
+        if ! diff -rq "$_theme_src" "$_theme_dst" >/dev/null 2>&1; then
+            _theme_changed=1
+        fi
+        mkdir -p "$_theme_dst"
+        cp -rf "$_theme_src/." "$_theme_dst/"
+        if (( _theme_changed )); then
+            rm -f "${HOME}/.cache/plasma_theme_${DESKTOP_THEME}.kcache" 2>/dev/null || true
+        fi
+        plasma-apply-desktoptheme "$DESKTOP_THEME" >/dev/null 2>&1 \
+            && echo "[ok] desktop theme: ${DESKTOP_THEME} (frosted panel)" \
+            || echo "[!]  could not apply ${DESKTOP_THEME}"
+    else
+        plasma-apply-desktoptheme breeze-dark >/dev/null 2>&1 || true
+        echo "[*]  ${DESKTOP_THEME} theme files not found at ${_theme_src} — applied breeze-dark"
+    fi
 fi
 
 # ───────────────────────────────────────────────────────────────────
