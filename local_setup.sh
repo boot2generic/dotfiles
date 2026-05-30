@@ -4,12 +4,12 @@
 # Provisions the *current* machine with the full desktop stack — runs
 # locally, no SSH, no pexpect.  Two desktop paths:
 #
-#   • --desktop=i3                — X11 + i3 + polybar + picom + rofi
+#   • --desktop=i3   (default: VMs) — X11 + i3 + polybar + picom + rofi
 #                         + dunst + lightdm + pulseaudio.  The
 #                         original cyberpunk stack; behaviour is
 #                         byte-identical to pre-Plasma versions of
 #                         this script.
-#   • --desktop=plasma  (default) — KDE Plasma 6 on Wayland + KWin
+#   • --desktop=plasma (default: HW) — KDE Plasma 6 on Wayland + KWin
 #                         + sddm + pipewire + konsole + dolphin +
 #                         kde-config-screenlocker.  Recommended on
 #                         physical desktops with NVIDIA + multi-
@@ -117,7 +117,9 @@
 #                                     install + deploy + validate.
 #                                     `--i3` and `--plasma` are
 #                                     shorthand for the same.  Default
-#                                     is plasma.  Picking `i3` swaps:
+#                                     is auto: plasma on bare metal,
+#                                     i3 on VMs/Hyper-V.  Picking `i3`
+#                                     on bare metal swaps:
 #                                       - apt set: plasma-desktop +
 #                                         kwin-wayland + sddm +
 #                                         pipewire + xwayland + …
@@ -4090,11 +4092,14 @@ WANT_WIFI_TAKEOVER=1
 WANT_APPS=1     # 1 = run apps stage during setup (default-on); 0 = --no-apps opts out
 APPS_TIER=""   # empty = install all tiers; comma-list (e.g. "tier1,tier4") restricts
 APPS_DRY_RUN=0 # 1 = apps stage walks the pipeline without installing (--apps-dry-run)
-# Desktop stack selection.  Default is `plasma` (KDE Plasma 6 on Wayland
-# with SDDM + PipeWire).  `i3` selects the original cyberpunk X11 stack
-# (i3 + polybar + picom + rofi) — still fully supported, just no longer
-# the default; pass `--desktop=i3` for it.  See readme/plasma.md.
-DESKTOP="plasma"
+# Desktop stack selection.  Left EMPTY here so it can be resolved from the
+# detected virtualization type AFTER detect_virt() runs (see below): bare
+# metal defaults to `plasma` (KDE Plasma 6 on Wayland + SDDM + PipeWire),
+# while VMs / Hyper-V default to the lighter `i3` X11 stack (Plasma-on-
+# Wayland compositing is unreliable under many hypervisors).  An explicit
+# --desktop=i3|plasma (or --i3/--plasma) sets it here and always wins.
+# See readme/plasma.md.
+DESKTOP=""
 # Default for `setup` is INTERACTIVE.  If stdin isn't a TTY (piped, SSH
 # without -t, CI), we silently flip to bypass — otherwise read would hang
 # the entire pipeline waiting for input that's never coming.
@@ -4146,8 +4151,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate desktop selection — fail fast before any apt/sudo work.
+# Empty is allowed here: it means "not pinned on the CLI", and gets
+# resolved from VIRT_TYPE after detect_virt() (physical → plasma, VM → i3).
 case "$DESKTOP" in
-  i3|plasma) ;;
+  ""|i3|plasma) ;;
   *) die "Unknown --desktop=$DESKTOP (expected: i3, plasma)" ;;
 esac
 
@@ -4173,6 +4180,19 @@ detect_gpu
 detect_cpu
 [[ -n "$FORCE_VIRT" ]] && VIRT_TYPE="$FORCE_VIRT"
 [[ -n "$FORCE_GPU"  ]] && GPU_VENDOR="$FORCE_GPU"
+
+# Resolve the desktop default from virtualization type, unless the user
+# pinned it explicitly with --desktop/--i3/--plasma (which leaves DESKTOP
+# non-empty above).  Non-virtualized (bare metal) → full Plasma 6 stack
+# with all the deployed plasma settings (dock, frosted theme, panel, etc.);
+# VM/Hyper-V → i3 fallback.
+if [[ -z "$DESKTOP" ]]; then
+    case "$VIRT_TYPE" in
+        physical) DESKTOP="plasma" ;;
+        *)        DESKTOP="i3" ;;
+    esac
+    log "desktop default for VIRT_TYPE=${VIRT_TYPE}: ${DESKTOP}"
+fi
 print_hardware
 
 case "$ACTION" in
