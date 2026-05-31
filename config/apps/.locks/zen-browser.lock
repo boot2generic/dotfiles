@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "zen-browser"
+install_method    = "github-release"
+installed_at      = "2026-05-30T02:08:55Z"
+installed_version = "1.20.1b"
+installed_sha256  = "df72284827c412df9ec2bbe61e24c5bb72ba83256990565876c5db45aba89108"
+install_path      = "/usr/local/bin/zen-browser.AppImage"
+verified_by       = "sha256"
+manifest_pin_mode = "frozen"

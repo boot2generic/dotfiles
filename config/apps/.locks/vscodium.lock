@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "vscodium"
+install_method    = "apt-pinned-repo"
+installed_at      = "2026-05-30T02:00:07Z"
+installed_version = "1.121.03429"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "gpg-keyring:1302DE60231889FE1EBACADC54678CF75A278D9C"
+manifest_pin_mode = "track-latest"

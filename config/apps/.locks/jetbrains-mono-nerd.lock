@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "jetbrains-mono-nerd"
+install_method    = "github-release"
+installed_at      = "2026-05-30T02:00:35Z"
+installed_version = "v3.3.0"
+installed_sha256  = "2d83782a350b604bfa70fce880604a41a7f77c3eec8f922f9cdc3c20952ddbe4"
+install_path      = "/usr/local/share/fonts/JetBrainsMono"
+verified_by       = "sha256"
+manifest_pin_mode = "frozen"

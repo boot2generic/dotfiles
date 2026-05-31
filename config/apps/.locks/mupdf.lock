@@ -1,0 +1,11 @@
+schema_version = 1
+
+[lock]
+name              = "mupdf"
+install_method    = "apt"
+installed_at      = "2026-05-30T01:59:32Z"
+installed_version = "1.25.1+ds1-6+deb13u1"
+installed_sha256  = ""
+install_path      = ""
+verified_by       = "apt-archive"
+manifest_pin_mode = "track-latest"
