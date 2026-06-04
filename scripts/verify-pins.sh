@@ -213,6 +213,41 @@ else:
 ' "$json" "$path"
 }
 
+# Batched sibling of json_get: resolve MANY dotted paths from one entry
+# in a SINGLE python process, one resolved value per output line, in the
+# order the paths were given.  Same rules as json_get (lists space-joined,
+# bools "true"/"false", missing/None → empty line).
+#
+# Why this exists: json_get spawns a fresh python interpreter per field.
+# verify_entry pulls ~18 fields, so across a few dozen [[apps]] entries
+# that was 500+ interpreter starts — ~25s wall, which blew conky's 5s
+# check_pins() budget and showed as "verify-pins timeout".  Batching to
+# one interpreter start per entry brings the whole run back to ~2s.
+# None of these fields can contain a newline (names, methods, paths,
+# hashes, fingerprints, versions, urls), so newline-delimited output is
+# unambiguous; mapfile -t reads it back positionally.
+json_get_many() {
+    local json="$1"; shift
+    python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+for path in sys.argv[2:]:
+    cur = data
+    for key in path.split("."):
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            cur = None
+            break
+    if isinstance(cur, (list, tuple)):
+        print(" ".join(str(x) for x in cur))
+    elif isinstance(cur, bool):
+        print("true" if cur else "false")
+    else:
+        print(cur if cur is not None else "")
+' "$json" "$@"
+}
+
 # Days between $1 (YYYY-MM-DD) and today.  GNU date handles ISO dates
 # directly; we treat parse failure as "very old" so a malformed pin
 # trips the staleness check instead of silently passing.
@@ -244,37 +279,39 @@ source "${SCRIPT_DIR}/lib/gpg-helpers.sh"
 verify_entry() {
     local entry_json="$1"
 
-    # Pull fields out of the JSON entry.  The schema-v2 layout puts
-    # name/machines at the TOP of the entry (not under meta.*).
-    local name method
-    name="$(json_get "$entry_json" 'name')"
-    method="$(json_get "$entry_json" 'install.method')"
+    # Pull every field we need out of the JSON entry in ONE python call.
+    # (Previously each of these was a separate json_get → a separate
+    # python interpreter start; ~18 fields × dozens of apps = 500+ starts
+    # and a 25s run that tripped conky's timeout.  See json_get_many.)
+    # The schema-v2 layout puts name/machines at the TOP of the entry
+    # (not under meta.*).  Order here MUST match the indexing below.
+    local _f
+    mapfile -t _f < <(json_get_many "$entry_json" \
+        'name' \
+        'install.method' \
+        'pin.mode' \
+        'pin.last_refreshed' \
+        'pin.refresh_after_days' \
+        'install.apt_pinned_repo.package' \
+        'install.apt_pinned_repo.key_fingerprint' \
+        'install.apt_pinned_repo.keyring_file' \
+        'install.apt_pinned_repo.sources_file' \
+        'install.github_release.repo' \
+        'install.github_release.version' \
+        'install.github_release.install_to' \
+        'install.github_release.sha256_x86_64' \
+        'install.github_release.sha256_aarch64' \
+        'install.github_release.gpg_fingerprint' \
+        'install.direct_deb.url' \
+        'install.direct_deb.sha256' \
+        'install.direct_deb.version')
 
-    # Pin mode + freshness fields.
-    local pin_mode pin_last pin_refresh_days
-    pin_mode="$(json_get "$entry_json" 'pin.mode')"
-    pin_last="$(json_get "$entry_json" 'pin.last_refreshed')"
-    pin_refresh_days="$(json_get "$entry_json" 'pin.refresh_after_days')"
-
-    # Method-specific sub-tables.
-    local apr_pkg apr_kfp apr_kf apr_sf
-    apr_pkg="$(json_get "$entry_json" 'install.apt_pinned_repo.package')"
-    apr_kfp="$(json_get "$entry_json" 'install.apt_pinned_repo.key_fingerprint')"
-    apr_kf="$( json_get "$entry_json" 'install.apt_pinned_repo.keyring_file')"
-    apr_sf="$( json_get "$entry_json" 'install.apt_pinned_repo.sources_file')"
-
-    local gh_repo gh_version gh_install_to gh_sha_x gh_sha_a gh_gpg_fp
-    gh_repo="$(      json_get "$entry_json" 'install.github_release.repo')"
-    gh_version="$(   json_get "$entry_json" 'install.github_release.version')"
-    gh_install_to="$(json_get "$entry_json" 'install.github_release.install_to')"
-    gh_sha_x="$(     json_get "$entry_json" 'install.github_release.sha256_x86_64')"
-    gh_sha_a="$(     json_get "$entry_json" 'install.github_release.sha256_aarch64')"
-    gh_gpg_fp="$(    json_get "$entry_json" 'install.github_release.gpg_fingerprint')"
-
-    local dd_url dd_sha dd_version
-    dd_url="$(    json_get "$entry_json" 'install.direct_deb.url')"
-    dd_sha="$(    json_get "$entry_json" 'install.direct_deb.sha256')"
-    dd_version="$(json_get "$entry_json" 'install.direct_deb.version')"
+    local name="${_f[0]}" method="${_f[1]}"
+    local pin_mode="${_f[2]}" pin_last="${_f[3]}" pin_refresh_days="${_f[4]}"
+    local apr_pkg="${_f[5]}" apr_kfp="${_f[6]}" apr_kf="${_f[7]}" apr_sf="${_f[8]}"
+    local gh_repo="${_f[9]}" gh_version="${_f[10]}" gh_install_to="${_f[11]}"
+    local gh_sha_x="${_f[12]}" gh_sha_a="${_f[13]}" gh_gpg_fp="${_f[14]}"
+    local dd_url="${_f[15]}" dd_sha="${_f[16]}" dd_version="${_f[17]}"
 
     RESULT_NAME="$name"
     RESULT_METHOD="$method"
