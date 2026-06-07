@@ -2404,6 +2404,44 @@ deploy_phase() {
           --group "cyberpunk-cheatsheet.desktop" --key "_launch" \
           "Meta+Slash,none,Cyberpunk hotkey cheatsheet"
         ok ".config/kglobalshortcutsrc (merged via kwriteconfig6)"
+        # klipperrc — neuter Plasma's built-in clipboard manager so CopyQ
+        # is the effective clipboard owner.  Running Klipper AND CopyQ at
+        # once means two managers fight for the Wayland clipboard selection
+        # and the loser re-serves its stale cached value — the "fake paste"
+        # bug.  We can't cleanly kill the Klipper service (it lives inside
+        # plasmashell), so we make it inert.  These take effect on the next
+        # plasmashell start; reloadConfig picks up most of them live.
+        #   • KeepClipboardContents=false + MaxClipItems=1 — keep no
+        #     scrollback history, so there's no stale value to serve and
+        #     nothing persisted in plaintext (privacy; matches the CopyQ
+        #     profile's no-store stance).  Verified: after this, Klipper's
+        #     history holds only the single current item.
+        #   • PreventEmptyClipboard=false — best-effort: asks Klipper not
+        #     to restore on empty.  NOTE this does NOT reliably stop the
+        #     KWin-level "onlyReplaceEmpty" restore, which is why
+        #     clipboard-autoclear.sh clears by overwriting with an empty
+        #     offer rather than releasing the selection — see that script.
+        #   • SyncClipboards=false / IgnoreSelection=true — don't mirror or
+        #     manage the PRIMARY (middle-click) selection.
+        #   • IgnoreImages=true — don't capture copied images.
+        #     (MaxClipItems has a floor of 1; 0 is rejected.)
+        #   • ActionsEnabled=false — no automatic pop-up "actions" on copy.
+        local kf="${HOME}/.config/klipperrc"
+        kwriteconfig6 --file "$kf" --group General \
+          --key PreventEmptyClipboard --type bool false
+        kwriteconfig6 --file "$kf" --group General \
+          --key KeepClipboardContents --type bool false
+        kwriteconfig6 --file "$kf" --group General \
+          --key SyncClipboards --type bool false
+        kwriteconfig6 --file "$kf" --group General \
+          --key IgnoreSelection --type bool true
+        kwriteconfig6 --file "$kf" --group General \
+          --key IgnoreImages --type bool true
+        kwriteconfig6 --file "$kf" --group General \
+          --key MaxClipItems 1
+        kwriteconfig6 --file "$kf" --group General \
+          --key ActionsEnabled --type bool false
+        ok ".config/klipperrc (Klipper neutered → CopyQ is sole manager)"
       elif [[ -f "${plasma_src}/kglobalshortcutsrc" ]]; then
         # Fallback: kwriteconfig6 missing (apt list raced terminal_phase).
         # Only install if NO existing file — refuse to clobber.
@@ -2457,6 +2495,27 @@ deploy_phase() {
       deploy_templated_file \
         "${plasma_src}/autostart/cyberpunk-theme.desktop" \
         "${HOME}/.config/autostart/cyberpunk-theme.desktop" 0644
+      # clipboard-autoclear — Wayland watcher that wipes the clipboard 30s
+      # after the last copy (KeePassXC-style auto-clear for ALL content).
+      # Templated like the others (@HOME@ in Exec=).  OnlyShowIn=KDE keeps
+      # it off the X11/i3 path.  Pairs with the Klipper neutering below:
+      # the watcher's clears only STICK because PreventEmptyClipboard=false
+      # stops Klipper refilling the board the instant it goes empty.
+      deploy_templated_file \
+        "${plasma_src}/autostart/clipboard-autoclear.desktop" \
+        "${HOME}/.config/autostart/clipboard-autoclear.desktop" 0644
+      install -D -m 0755 "${plasma_src}/clipboard-autoclear.sh" \
+        "${HOME}/.config/plasma/clipboard-autoclear.sh"
+      ok ".config/plasma/clipboard-autoclear.sh"
+      # CLIPBOARD_CLEAR_TIMEOUT — session-wide env var read by both the
+      # watcher above and ~/.config/conky/clipboard-status.sh.  Dropped
+      # into ~/.config/environment.d/ so pam_systemd imports it at
+      # graphical-session start (same mechanism as the nvidia env file).
+      # Takes effect on next login.  install -D (not rsync --delete) so we
+      # never touch other tools' files in this shared dir.
+      install -D -m 0644 "${plasma_src}/environment.d/clipboard-autoclear.conf" \
+        "${HOME}/.config/environment.d/clipboard-autoclear.conf"
+      ok ".config/environment.d/clipboard-autoclear.conf"
       install -D -m 0755 "${plasma_src}/apply-theme.sh" \
         "${HOME}/.config/plasma/apply-theme.sh"
       ok ".config/plasma/apply-theme.sh"

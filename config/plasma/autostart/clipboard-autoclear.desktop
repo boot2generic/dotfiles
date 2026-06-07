@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Clipboard auto-clear (cyberpunk dotfiles)
+Comment=Wipe the clipboard 30s after the last copy so secrets don't linger
+Exec=@HOME@/.config/plasma/clipboard-autoclear.sh
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-GNOME-Autostart-enabled=false
+StartupNotify=false
+Terminal=false
