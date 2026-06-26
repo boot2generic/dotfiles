@@ -559,6 +559,164 @@ together.
 
 ---
 
+## Security event log
+
+The conky HEALTH panel is *live*: it tells you THAT a security check is
+red right now, but it keeps no history and its drift rows can't show
+WHAT changed. The **security event log** is the persistent companion —
+an append-only JSONL record that the security checks write to on every
+OK→WARN/BAD transition, capturing the *why*: which file drifted (old→new
+sha), which port/SUID/module appeared, which daemon spawned a shell,
+which connection started beaconing, which pin failed verification.
+
+Implemented in [`~/.config/conky/seclog.py`](../config/conky/seclog.py),
+written by the same processes that drive the panel
+(`health.py`, `netstat.py`, `listenports.py`).
+
+### Quick glance
+
+```bash
+seclog            # path + size + recent alerts, FULLY expanded + colourised
+seclog -n 100     # last 100 events
+seclog --all      # every event (includes the .1 rollover)
+seclogf           # same view, then live-follow new alerts as they arrive
+seclog-raw        # verbatim JSONL dump (pipe to jq/grep)
+```
+
+The view is one line per alert — a simple, lightly-coloured display of
+the log (dim timestamp, coloured severity, bold check) with the full
+detail kept inline, so nothing is hidden and nothing is exploded into
+tabbed blocks. `seclog-raw` is there for machine processing
+(`seclog-raw | jq 'select(.sev=="bad")'`). Aliases in
+[`config/zsh/.zshrc`](../config/zsh/.zshrc); all wrap
+`python3 ~/.config/conky/seclog.py`. The viewer auto-targets whichever
+log is active — see the two tiers below.
+
+### Clearing alerts after you investigate
+
+Once you've looked into a drift alert and decided the current state is
+fine, accept it as the new baseline so the conky panel goes back to
+clean:
+
+```bash
+seclog-clear              # re-baseline ALL drift checks (critfile/suid/ports/modules)
+seclog-clear suid         # just one: critfile | suid | ports | modules
+```
+
+This deletes the relevant `~/.config/conky/baseline-*.txt` so the next
+health cycle rebuilds it; the row then renders green and its transition
+logic emits a `resolved` event. The clear itself is logged as a
+`user_ack` event recording exactly what you accepted — so "I cleared
+this on this date" is part of the audit trail. It **never** deletes the
+event log (that's the history; view it with `seclog`).
+
+Note which alerts this does and doesn't address:
+- **Drift** (critfile / SUID / ports / modules) → cleared by `seclog-clear`.
+- **Live anomalies** (parent-anomaly, suspicious-exe, hidden-PIDs,
+  beacons, rogue listeners) → can't be "acked"; they clear themselves
+  when the condition is gone (by design — you shouldn't be able to
+  silence a live reverse shell).
+- **Supply-chain staleness** → clear by refreshing the pin date
+  (`scripts/refresh-pins.sh`); a *failed* pin needs the manifest fixed.
+- **sudo counters** → 24 h rolling windows; they age out on their own.
+
+### What gets logged
+
+The **security subset** of the checks, on transition only (a persistent
+BAD writes ONE event, not one every 30 s cycle): critical-file / SUID /
+kernel-module / listening-port drift, daemon→shell parent anomalies,
+suspicious / deleted exe paths, hidden PIDs, failed-sudo spikes,
+successful-sudo spikes, supply-chain pin failures, netstat beacons,
+rogue (non-packaged / `(deleted)`) listeners — plus `seclog_tamper`
+events (always). Clearing a condition logs one `info` "resolved" event
+so the log shows when it went green again.
+
+**Redaction.** For the auth crown jewels (`/etc/shadow`, `/etc/passwd`,
+`/etc/sudoers*`) the event records path + old→new sha only, never
+content (`"redacted": true`). Other paths carry full sha-level detail.
+The only place real textual diffs are stored is the tamper watcher (it
+keeps a shadow copy of the log's own last-good bytes — see below) — and
+that content is the already-redacted log, so no secrets land on disk.
+
+**Size cap.** 256 KiB per file with one `.1` rollover (≈512 KiB worst
+case per tier), so the log can never grow unbounded. Rotation is a
+legitimate write that updates the integrity baseline in the same step,
+so it never self-triggers a tamper alert.
+
+### Tamper-watching (conky guards its own log)
+
+The new HEALTH row **`seclog`** is the watcher. Each cycle it re-reads
+the active log and compares it against an integrity sidecar
+(`sha256` + `size` + `mtime` + a shadow copy of the last-good bytes):
+
+| `seclog` row | Meaning |
+|---|---|
+| `guarded (N)` / `guarded+a (N)` | log matches the sidecar; N events. `+a` = Tier-2 append-only verified. |
+| `mtime touched` (WARN) | content identical but the timestamp moved — someone `touch`ed/`utime`'d it. The mtime must move ONLY when the writer writes. |
+| `TAMPERED +A -B` (BAD) | the log content diverged from the last-good snapshot. A **unified diff** of exactly what was altered is written into the log as a `seclog_tamper` event. |
+| `baseline (N)` / `module missing` (DIM) | first sight of the log (trust established) / `seclog.py` not deployed. |
+
+Detection is wired into **every append path**, not just the watcher row,
+so a tamper can never be silently absorbed by a later legitimate append
+— whichever process writes next catches it and records the diff. (If a
+concurrent appender catches it first, the row may read green while
+`seclog` shows the recorded `seclog_tamper` event.)
+
+To re-baseline after you *legitimately* edit the log (rare), just delete
+the sidecar — `rm ~/.local/state/dotfiles/.seclog.state.json` — and the
+next cycle re-establishes trust silently.
+
+### Two integrity tiers
+
+| | Writer | Log path | Guarantee |
+|---|---|---|---|
+| **Tier 1** — always-on | `health.py` etc., as your user | `~/.local/state/dotfiles/security.log` (0700 dir, 0600 files) | tamper-**evident** |
+| **Tier 2** — after `harden` | root helper via NOPASSWD sudo | `/var/log/dotfiles/security.log`, root-owned + `chattr +a` | tamper-**resistant** |
+
+**The same-UID ceiling (be honest about it).** At Tier 1 the log, sidecar
+and shadow are all owned by your user, so a malicious process running as
+*you* can edit the log AND rewrite the sidecar to match — Tier 1 is
+genuine tamper-*evidence* (it catches corruption, unsophisticated
+tampering, and anything that strikes before it can rewrite the sidecar),
+not tamper-*proof*. We deliberately do **not** HMAC-chain the records:
+against a same-UID adversary the key is readable too, so it would add
+audit cost without changing the guarantee. The real guarantee comes from
+Tier 2.
+
+**Tier 2 (what `harden` adds).** `local_setup.sh harden`:
+- installs the append-only helper to `/usr/local/lib/dotfiles/seclog-append`
+  (root-owned 0755 — **not** user-writable, so the grant below can't be
+  repurposed);
+- creates `/var/log/dotfiles/security.log` root-owned and `chattr +a`;
+- adds a single narrow NOPASSWD rule (alongside the existing
+  `DOTFILES_VPN`/`APT`/`SVC`/`NET` aliases):
+
+  ```
+  DOTFILES_SECLOG → /usr/local/lib/dotfiles/seclog-append
+  ```
+
+The helper takes **no arguments** (the log path is hard-coded), reads
+**one** validated JSON record from **stdin** (mirroring the repo's
+"no secrets in argv" rule), and appends it. Because the log is root-owned
+and append-only, a non-root process — including one running as your UID —
+cannot edit, truncate, or backdate it; the watcher additionally asserts
+the file is still root-owned and still `+a` (losing either takes root, so
+it's a high-signal event). `seclog.py` routes to Tier 2 only when BOTH
+the root log and the helper exist, so `unharden` (which drops the
+append-only attribute, removes the helper, and leaves the old root log as
+a historical artifact) cleanly falls back to the Tier-1 user log.
+
+### Relationship to the rest of the stack
+
+The `seclog` log is the **detailed, persistent** layer; the conky HEALTH
+panel is the **live** layer; `auditd` (Tier-2 `harden`) is the
+**kernel-level forensic** layer that records the UID behind a change.
+The seclog drift events answer "what did my own checks see change, and
+when"; cross-reference a `critfile_drift` event's timestamp against
+`sudo ausearch -k sudoers --start <time>` to get the UID that did it.
+
+---
+
 ## Application install supply chain
 
 Every third-party app the dotfiles install — 27 entries as of this

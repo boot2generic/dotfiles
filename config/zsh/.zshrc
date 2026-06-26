@@ -195,6 +195,24 @@ alias free='free -h'
 alias top='btop'
 alias ports='ss -tulpn'
 
+# Security event log — the detailed companion to the conky HEALTH panel.
+# One line per alert: a simple, lightly-coloured display of the log file
+# (dim timestamp, coloured severity, bold check) with the full detail
+# kept inline — nothing hidden, nothing exploded into tabbed blocks.
+# `seclog`      → path + size + colourised recent alerts (one line each)
+# `seclog -n N` → last N events   ·   `seclog --all` → every event (+rollover)
+# `seclogf`     → same view, then live-follow new alerts as they land
+# `seclog-raw`  → verbatim JSONL dump (pipe to jq/grep)
+# (auto-targets the active log: Tier-2 /var/log/dotfiles/security.log when
+#  hardened, else the Tier-1 ~/.local/state/dotfiles/security.log)
+alias seclog='python3 ~/.config/conky/seclog.py --tail'
+alias seclogf='python3 ~/.config/conky/seclog.py --follow'
+alias seclog-raw='python3 ~/.config/conky/seclog.py --raw'
+# Clear/ack a drift alert after you've investigated it: re-baselines the
+# named check (critfile|suid|ports|modules, default all) so the conky row
+# goes green next cycle.  Logs a `user_ack` event; never deletes history.
+alias seclog-clear='python3 ~/.config/conky/seclog.py --clear'
+
 # ── bat (pretty cat with syntax highlighting) ─────────────────
 # Debian ships bat as 'batcat'; ~/.local/bin/bat is symlinked by install script
 if command -v bat &>/dev/null; then

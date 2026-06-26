@@ -40,12 +40,40 @@ from __future__ import annotations
 import os, re, subprocess, time
 from pathlib import Path
 
+# seclog: the persistent security event log + tamper watcher.  Imported
+# best-effort — a missing/broken seclog.py must never take the panel
+# down, so every call site tolerates `seclog is None`.
+try:
+    import seclog  # same dir (~/.config/conky) is on sys.path[0]
+except Exception:
+    seclog = None   # type: ignore
+
 # ── Colour helpers (conky template strings) ─────────────────
 OK    = "${color2}"   # green
 WARN  = "${color3}"   # yellow
 BAD   = "${color5}"   # red
 DIM   = "${color4}"   # dim grey label
 RESET = "${color}"
+
+# Map a seclog level string to the conky colour constant above, so the
+# integrity row colours consistently with every other health row.
+_SEV_COLOR = {"ok": OK, "warn": WARN, "bad": BAD, "dim": DIM, "info": OK}
+
+
+def _seclog_note(check: str, sev: str, summary: str, detail: object = None) -> None:
+    """Forward a check's verdict to the security event log.  `sev` is a
+    conky colour constant (OK/WARN/BAD/DIM); translate it to seclog's
+    level vocabulary.  No-op when seclog is unavailable."""
+    if seclog is None:
+        return
+    level = {OK: "ok", WARN: "warn", BAD: "bad", DIM: "dim"}.get(sev, "ok")
+    # DIM rows are "couldn't determine", not security states — don't log.
+    if level == "dim":
+        return
+    try:
+        seclog.note(check, level, summary, detail)
+    except Exception:
+        pass
 
 LINE_WIDTH = 36   # fits within conky panel maximum_width=460
 
@@ -174,8 +202,11 @@ def check_failed_sudo() -> str:
                timeout=4)
     n = sum(1 for _ in out.splitlines())
     if n == 0:
+        _seclog_note("failed_sudo", OK, "0 in 24h")
         return line("failed sudo 24h", OK, "0")
     sev = BAD if n >= 5 else WARN
+    _seclog_note("failed_sudo", sev, f"{n} failed sudo attempts in 24h",
+                 {"count": n})
     return line("failed sudo 24h", sev, str(n))
 
 
@@ -372,6 +403,7 @@ def check_port_drift() -> str:
     added   = current - baseline
     removed = baseline - current
     if not added and not removed:
+        _seclog_note("port_drift", OK, f"matches baseline ({len(current)})")
         return line("port drift", OK, f"matches baseline ({len(current)})")
 
     bits = []
@@ -380,6 +412,8 @@ def check_port_drift() -> str:
     if removed:
         bits.append(f"-{len(removed)} {sorted(removed)[0][-12:]}")
     sev = BAD if added else WARN     # adds are scarier than removes
+    detail = {"added": sorted(added), "removed": sorted(removed)}
+    _seclog_note("port_drift", sev, " ".join(bits), detail)
     return line("port drift", sev, " ".join(bits))
 
 
@@ -570,11 +604,14 @@ def check_suspicious_paths() -> str:
     except OSError:
         return line("suspicious exe", DIM, "/proc unreadable")
     if not hits:
+        _seclog_note("suspicious_exe", OK, "none")
         return line("suspicious exe", OK, "none")
     # Surface the worst hit first; ties broken by iteration order (stable).
     hits.sort(key=lambda h: 0 if h[0] is BAD else 1)
     worst_sev = hits[0][0]
     n = len(hits)
+    _seclog_note("suspicious_exe", worst_sev, f"{n} suspicious exe path(s)",
+                 {"hits": [d for _s, d in hits[:8]]})
     # Cap at ~42 chars per row so the panel never wraps (panel max_width
     # 460 / JBM size 8 ≈ 65 chars total, minus the 20-char marker+label
     # prefix = ~45 chars of detail headroom).
@@ -654,9 +691,12 @@ def check_hidden_pids() -> str:
     hidden = persistently_alive - ps_pids
     n = len(hidden)
     if n == 0:
+        _seclog_note("hidden_pids", OK, "none")
         return line("hidden PIDs", OK, "none")
     # Sample one hidden PID; the user can `ls /proc/<pid>/{exe,comm,cmdline}`
     sample = sorted(hidden, key=int)[0]
+    _seclog_note("hidden_pids", BAD, f"{n} hidden PID(s)",
+                 {"pids": sorted(hidden, key=int)[:20]})
     return line("hidden PIDs", BAD, f"{n} (e.g. {sample})")
 
 
@@ -748,6 +788,7 @@ def check_critical_file_drift() -> str:
                if current[p] != baseline[p]}
 
     if not added and not removed and not changed:
+        _seclog_note("critfile_drift", OK, f"matches baseline ({len(current)})")
         return line("critfile drift", OK, f"matches baseline ({len(current)})")
 
     # Any change in these files is BAD — they almost never change
@@ -763,6 +804,36 @@ def check_critical_file_drift() -> str:
     if removed:
         sample = sorted(removed)[0]
         bits.append(f"-{len(removed)} {sample[-18:]}")
+
+    # Persist the detail to the security log.  Redaction policy: for the
+    # auth crown jewels (shadow/passwd/sudoers) we record path + old→new
+    # sha only, never anything derived from content — the hash reveals
+    # nothing, and these files aren't readable to diff anyway.  Other
+    # paths (authorized_keys, systemd units, cron.d) carry the same
+    # sha-level detail (the baseline stores hashes, not old content, so a
+    # textual diff isn't reconstructable here — the tamper watcher is the
+    # component that keeps a shadow copy for true diffs).
+    def _sensitive(p: str) -> bool:
+        return (p in ("/etc/shadow", "/etc/passwd", "/etc/sudoers")
+                or p.startswith("/etc/sudoers.d/"))
+
+    def _entry(p: str, kind: str) -> dict:
+        e = {"path": p, "change": kind, "redacted": _sensitive(p)}
+        if kind == "changed":
+            e["old_sha"] = baseline.get(p, "")[:12]
+            e["new_sha"] = current.get(p, "")[:12]
+        elif kind == "added":
+            e["new_sha"] = current.get(p, "")[:12]
+        elif kind == "removed":
+            e["old_sha"] = baseline.get(p, "")[:12]
+        return e
+
+    detail = {"files": (
+        [_entry(p, "changed") for p in sorted(changed)]
+        + [_entry(p, "added") for p in sorted(added)]
+        + [_entry(p, "removed") for p in sorted(removed)]
+    )[:20]}
+    _seclog_note("critfile_drift", BAD, " ".join(bits), detail)
     return line("critfile drift", BAD, " ".join(bits))
 
 
@@ -783,7 +854,28 @@ def check_recent_sudo_invocations() -> str:
         return line("sudo ok 24h", OK, "0 in 24h")
 
     # journalctl default line: "May 18 09:00:01 host sudo[1234]: user : TTY=... ; PWD=... ; USER=root ; COMMAND=/usr/bin/apt update"
-    lines = [ln for ln in out.splitlines() if "COMMAND=" in ln]
+    # Exclude the dotfiles' OWN automated NOPASSWD commands: conky's
+    # netstat.py/listenports.py poll `sudo -n ss …` every few seconds
+    # (DOTFILES_NET) and, when hardened, the seclog writer calls
+    # `sudo -n seclog-append` (DOTFILES_SECLOG).  These are by-design,
+    # passwordless infrastructure — counting them buries the signal this
+    # check exists for (a SURPRISE privileged invocation) under thousands
+    # of self-generated rows.  ~92% of this box's sudo volume was conky's
+    # own `ss` polling before this filter.
+    # `sha256sum /etc/shadow` is conky's OWN critfile-drift check (it
+    # runs `sudo -n sha256sum /etc/shadow` each cycle in install/broad
+    # mode; after `harden` it's no longer allowlisted so it stops
+    # appearing as a *successful* sudo).  Exclude that exact command too.
+    AUTOMATED_PREFIXES = ("/usr/bin/ss ", "/usr/bin/ss\t",
+                          "/usr/local/lib/dotfiles/seclog-append",
+                          "/usr/bin/sha256sum /etc/shadow")
+
+    def _is_automated(ln: str) -> bool:
+        c = ln.split("COMMAND=", 1)[1].strip() if "COMMAND=" in ln else ""
+        return c.startswith(AUTOMATED_PREFIXES)
+
+    lines = [ln for ln in out.splitlines()
+             if "COMMAND=" in ln and not _is_automated(ln)]
     n = len(lines)
     if n == 0:
         return line("sudo ok 24h", OK, "0 in 24h")
@@ -820,6 +912,10 @@ def check_recent_sudo_invocations() -> str:
         rel = "recent"
 
     sev = OK if n <= 10 else (WARN if n <= 50 else BAD)
+    # Only a spike (WARN/BAD) is security-interesting; the OK case still
+    # calls note() so a previous spike clearing is recorded as resolved.
+    _seclog_note("sudo_invocations", sev, f"{n} successful sudo in 24h",
+                 {"count": n, "last_cmd": cmd, "last_rel": rel} if sev is not OK else None)
     return line("sudo ok 24h", sev, f"{n}, last {rel}: {cmd_short}")
 
 
@@ -906,6 +1002,7 @@ def check_suid_drift() -> str:
                if current[p] != baseline[p]}
 
     if not added and not removed and not changed:
+        _seclog_note("suid_drift", OK, f"matches baseline ({len(current)})")
         return line("suid drift", OK, f"matches baseline ({len(current)})")
 
     bits = []
@@ -916,6 +1013,13 @@ def check_suid_drift() -> str:
     if removed:
         bits.append(f"-{len(removed)} {sorted(removed)[0][-14:]}")
     sev = BAD if (added or changed) else WARN
+    detail = {
+        "added":   [{"path": p, "sha": current.get(p, "")[:12]} for p in sorted(added)][:20],
+        "changed": [{"path": p, "old_sha": baseline.get(p, "")[:12],
+                     "new_sha": current.get(p, "")[:12]} for p in sorted(changed)][:20],
+        "removed": [{"path": p} for p in sorted(removed)][:20],
+    }
+    _seclog_note("suid_drift", sev, " ".join(bits), detail)
     return line("suid drift", sev, " ".join(bits))
 
 
@@ -982,9 +1086,12 @@ def check_parent_anomaly() -> str:
                 break
 
     if not hits:
+        _seclog_note("parent_anomaly", OK, "none")
         return line("parent anomaly", OK, "none")
 
     n = len(hits)
+    _seclog_note("parent_anomaly", BAD, f"{n} daemon→shell pair(s)",
+                 {"pairs": hits[:8]})
     DETAIL_CAP = 42
     if n == 1:
         return line("parent anomaly", BAD, hits[0][:DETAIL_CAP])
@@ -1055,6 +1162,7 @@ def check_module_drift() -> str:
     added   = current_names - base_names
     removed = base_names - current_names
     if not added and not removed:
+        _seclog_note("module_drift", OK, f"matches baseline ({len(current_names)})")
         return line("module drift", OK, f"matches baseline ({len(current_names)})")
     bits = []
     if added:
@@ -1062,6 +1170,8 @@ def check_module_drift() -> str:
     if removed:
         bits.append(f"-{len(removed)} {sorted(removed)[0][:10]}")
     sev = BAD if added else WARN     # adds are scarier than removes
+    detail = {"added": sorted(added), "removed": sorted(removed)}
+    _seclog_note("module_drift", sev, " ".join(bits), detail)
     return line("module drift", sev, " ".join(bits))
 
 
@@ -1130,17 +1240,50 @@ def check_pins() -> str:
     if rc == 0:
         # rc==0 should always mean "all fresh".  Surface the count when
         # we can parse it for context; fall back to a generic label.
+        _seclog_note("supply_chain", OK, "all pins fresh")
         if n_ok > 0:
             return line("supply chain", OK, f"{n_ok} fresh")
         return line("supply chain", OK, "all fresh")
     if rc == 1:
         n = n_stale or "?"
+        _seclog_note("supply_chain", WARN, f"{n} pin(s) stale",
+                     {"stale": n_stale})
         return line("supply chain", WARN, f"{n} stale")
     if rc == 2:
         n = n_bad or "?"
+        # A pin verification failure (sha/gpg/keyring mismatch) is a
+        # supply-chain security event — capture the offending lines.
+        bad_lines = [l for l in out.splitlines() if l.startswith("[bad]")][:10]
+        _seclog_note("supply_chain", BAD, f"{n} pin(s) FAILED verification",
+                     {"failed": n_bad, "lines": bad_lines})
         return line("supply chain", BAD, f"{n} failed")
     # rc >= 3 (or anything unrecognised) → tool fault, don't pretend.
     return line("supply chain", DIM, f"verify-pins rc={rc}")
+
+
+# ── 22. Security-log integrity (the tamper watcher) ─────────
+def check_seclog_integrity() -> str:
+    """Verify the security event log hasn't been modified by anyone other
+    than the legitimate writer.
+
+    Delegates to seclog.verify(), which compares the live log against the
+    integrity sidecar (sha256 + size + mtime + shadow copy) and, at
+    Tier 2, asserts root ownership + the append-only attribute.  Any
+    divergence — an edit, a truncation, or a bare `touch` of the mtime —
+    is surfaced here AND recorded as a `seclog_tamper` event carrying a
+    diff of what changed, so the attempt is itself logged.
+
+    This runs FIRST in the security cluster so it judges the log as the
+    previous cycle left it, before this cycle's drift checks append new
+    events.
+    """
+    if seclog is None:
+        return line("seclog", DIM, "module missing")
+    try:
+        level, detail = seclog.verify()
+    except Exception as e:
+        return line("seclog", DIM, f"err: {type(e).__name__}")
+    return line("seclog", _SEV_COLOR.get(level, DIM), detail)
 
 
 # ── Driver ──────────────────────────────────────────────────
@@ -1156,6 +1299,14 @@ CHECKS = [
     check_oom,
     check_high_cpu,
     check_kernel_taint,
+    # Security-log integrity runs BEFORE every check that appends to the
+    # log (failed-sudo, the drift cluster, …) so the panel judges the log
+    # as the previous cycle left it — i.e. it gets first crack at showing
+    # idle tampering before this cycle's own events re-baseline it.
+    # (Detection is also wired into the append path itself, so a tamper is
+    # never *lost* regardless of ordering — this is purely about which
+    # cycle the red row surfaces on.)
+    check_seclog_integrity,
     check_failed_sudo,
     check_recent_sudo_invocations,
     # Drift checks clustered: same persistence-baseline pattern,

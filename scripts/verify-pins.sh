@@ -304,7 +304,9 @@ verify_entry() {
         'install.github_release.gpg_fingerprint' \
         'install.direct_deb.url' \
         'install.direct_deb.sha256' \
-        'install.direct_deb.version')
+        'install.direct_deb.version' \
+        'install.github_release.asset_pattern' \
+        'install.github_release.extract_path')
 
     local name="${_f[0]}" method="${_f[1]}"
     local pin_mode="${_f[2]}" pin_last="${_f[3]}" pin_refresh_days="${_f[4]}"
@@ -312,6 +314,7 @@ verify_entry() {
     local gh_repo="${_f[9]}" gh_version="${_f[10]}" gh_install_to="${_f[11]}"
     local gh_sha_x="${_f[12]}" gh_sha_a="${_f[13]}" gh_gpg_fp="${_f[14]}"
     local dd_url="${_f[15]}" dd_sha="${_f[16]}" dd_version="${_f[17]}"
+    local gh_asset="${_f[18]}" gh_extract="${_f[19]}"
 
     RESULT_NAME="$name"
     RESULT_METHOD="$method"
@@ -377,10 +380,32 @@ verify_entry() {
                     sha256_x86_64)  need_sha="$gh_sha_x" ;;
                     sha256_aarch64) need_sha="$gh_sha_a" ;;
                 esac
+                # Is the release asset an ARCHIVE from which a single
+                # binary is extracted?  If so, the pinned sha256_* is the
+                # *tarball/zip* sha (what the install adapter downloads and
+                # verifies — github-release.sh:291), NOT the sha of the
+                # extracted binary at install_to.  Re-hashing install_to
+                # here would compare a tarball hash against a binary hash
+                # and ALWAYS report a (false) mismatch — the bug that made
+                # starship perpetually [bad].  Detect the archive case via
+                # an archive asset_pattern OR a non-empty extract_path and
+                # skip the on-disk re-hash: the tarball sha was verified at
+                # download time (recorded in the lockfile) and can't be
+                # reconstructed from the extracted binary.  Freshness +
+                # any GPG check below still apply.
+                local gh_is_archive=0
+                if [[ -n "$gh_extract" ]] || \
+                   [[ "$gh_asset" =~ \.(tar\.(gz|xz|bz2|zst)|tgz|tbz2|txz|zip)$ ]]; then
+                    gh_is_archive=1
+                fi
                 if [[ -z "$need_sha" ]]; then
                     RESULT_STATUS="bad"; RESULT_REASON="missing ${ARCH_KEY} for this arch"
                 elif [[ ${#need_sha} -ne 64 ]]; then
                     RESULT_STATUS="bad"; RESULT_REASON="${ARCH_KEY} is not 64 hex chars"
+                elif (( gh_is_archive )); then
+                    # Cannot reverify a tarball sha against the extracted
+                    # binary; trust the install-time verification.
+                    RESULT_REASON="archive: sha verified at download"
                 elif [[ -n "$gh_install_to" && -f "$gh_install_to" ]]; then
                     local got
                     got=$(sha256sum "$gh_install_to" 2>/dev/null | awk '{print $1}')

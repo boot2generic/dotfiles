@@ -408,6 +408,24 @@ if n_beacon:
     header += f"   ${{color3}}{n_beacon}${{color}} beaconing"
 print(header)
 
+# ── Security event log: record periodic-reconnect beacons ──────────
+# A beacon (too-regular reconnect cadence) is the canonical C2 implant
+# signature, so it belongs in the persistent security log alongside the
+# health.py drift/anomaly events.  Best-effort: a logging hiccup must
+# never break the conky panel.
+try:
+    import seclog
+    if n_beacon:
+        bdetail = {"beacons": [
+            {"remote": c["raddr"], "rport": c["rport"], "proc": c["proc"]}
+            for c in conns if c["is_beacon"]][:20]}
+        seclog.note("netstat_beacon", "bad",
+                    f"{n_beacon} beaconing connection(s)", bdetail)
+    else:
+        seclog.note("netstat_beacon", "ok", "no beacons")
+except Exception:
+    pass
+
 # Sort: long-lived public connections first (most interesting), then
 # new ones, then everything else by recency.  Keeps the alerting rows
 # at the TOP where the user actually looks; mundane housekeeping conns

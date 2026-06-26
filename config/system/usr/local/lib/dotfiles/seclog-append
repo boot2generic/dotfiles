@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+seclog-append — the ONLY writer of the Tier-2 root-owned security log.
+
+Installed by `local_setup.sh harden` to /usr/local/lib/dotfiles/seclog-append
+(root-owned, mode 0755 — NOT user-writable) and exposed to the user's
+conky processes through a single narrow NOPASSWD sudoers rule
+(DOTFILES_SECLOG).  health.py / netstat.py / listenports.py pipe ONE
+formatted JSONL record to it on stdin; it validates and appends to
+
+    /var/log/dotfiles/security.log
+
+which is root-owned and `chattr +a` (append-only).  Because the log is
+append-only and root-owned, a process running as the user can neither
+edit, truncate, nor backdate it — that is the Tier-2 guarantee.  Appends
+are permitted under +a, so the normal path never removes the attribute;
+only the (rare) size-cap rotation briefly clears it under this helper's
+own root context.
+
+Hardening of the helper itself:
+  • Takes NO arguments — the log path is hard-coded, so the NOPASSWD
+    grant can never be pointed at another file.
+  • Reads at most MAX_RECORD_BYTES from stdin and requires exactly one
+    line containing one valid JSON object — no log injection of forged
+    multi-line content.
+  • Opens the log with O_NOFOLLOW + O_APPEND.  (The containing dir is
+    root-owned 0755 so a user can't pre-place a symlink anyway; this is
+    belt-and-suspenders.)
+
+Exit codes: 0 ok · 1 bad input · 2 io/attr error.
+"""
+import json
+import os
+import subprocess
+import sys
+
+LOG_DIR = "/var/log/dotfiles"
+LOG = os.path.join(LOG_DIR, "security.log")
+ROLLED = LOG + ".1"
+MAX_RECORD_BYTES = 8 * 1024
+SECLOG_MAX_BYTES = 256 * 1024   # keep in lock-step with seclog.py
+
+
+def _chattr(flag: str, path: str) -> None:
+    """Best-effort chattr; ignore failures (e.g. filesystem without
+    append-only support — the file is still root-owned, which is most of
+    the protection)."""
+    try:
+        subprocess.run(["chattr", flag, path],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5)
+    except Exception:
+        pass
+
+
+def _ensure_log() -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.chmod(LOG_DIR, 0o755)
+    if not os.path.exists(LOG):
+        fd = os.open(LOG, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.close(fd)
+        os.chmod(LOG, 0o644)
+        _chattr("+a", LOG)
+
+
+def _maybe_rotate(incoming: int) -> None:
+    try:
+        size = os.path.getsize(LOG)
+    except OSError:
+        return
+    if size == 0 or size + incoming <= SECLOG_MAX_BYTES:
+        return
+    # Rotation must modify the directory entry, which +a forbids — clear
+    # it for the swap, then re-arm.  Only this helper (root) ever does so.
+    _chattr("-a", LOG)
+    try:
+        os.replace(LOG, ROLLED)        # security.log → security.log.1
+        os.chmod(ROLLED, 0o644)
+    except OSError:
+        pass
+    fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    os.close(fd)
+    os.chmod(LOG, 0o644)
+    _chattr("+a", LOG)
+
+
+def main() -> int:
+    raw = sys.stdin.buffer.read(MAX_RECORD_BYTES + 1)
+    if not raw:
+        sys.stderr.write("seclog-append: empty input\n")
+        return 1
+    if len(raw) > MAX_RECORD_BYTES:
+        sys.stderr.write("seclog-append: record too large\n")
+        return 1
+    # Exactly one record: one line, one JSON object.
+    text = raw.decode("utf-8", "strict") if _is_utf8(raw) else None
+    if text is None:
+        sys.stderr.write("seclog-append: non-utf8 input\n")
+        return 1
+    line = text.rstrip("\n")
+    if "\n" in line:
+        sys.stderr.write("seclog-append: multi-line input rejected\n")
+        return 1
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        sys.stderr.write("seclog-append: not valid JSON\n")
+        return 1
+    if not isinstance(obj, dict):
+        sys.stderr.write("seclog-append: record is not a JSON object\n")
+        return 1
+
+    out = line + "\n"
+    try:
+        _ensure_log()
+        _maybe_rotate(len(out.encode("utf-8")))
+        # O_APPEND is allowed under +a; O_NOFOLLOW refuses a symlinked path.
+        fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            os.write(fd, out.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        sys.stderr.write(f"seclog-append: io error: {e}\n")
+        return 2
+    return 0
+
+
+def _is_utf8(b: bytes) -> bool:
+    try:
+        b.decode("utf-8", "strict")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

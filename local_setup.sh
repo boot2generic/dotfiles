@@ -3327,7 +3327,16 @@ Cmnd_Alias DOTFILES_NET = \\
     /usr/bin/ss -ua -nip,              \\
     /usr/bin/ss -wa -nip
 
-${USER} ALL=(root) NOPASSWD: DOTFILES_VPN, DOTFILES_APT, DOTFILES_SVC, DOTFILES_NET
+# Security event log (Tier 2) — the ONLY privileged write the dotfiles
+# need at runtime.  The helper takes NO arguments (the log path is
+# hard-coded), reads ONE validated JSON record from stdin, and appends it
+# to the root-owned, append-only /var/log/dotfiles/security.log.  It is
+# root-owned 0755 (not user-writable), so this NOPASSWD grant can't be
+# repurposed.  See readme/security.md → "Security event log".
+Cmnd_Alias DOTFILES_SECLOG = \\
+    /usr/local/lib/dotfiles/seclog-append
+
+${USER} ALL=(root) NOPASSWD: DOTFILES_VPN, DOTFILES_APT, DOTFILES_SVC, DOTFILES_NET, DOTFILES_SECLOG
 EOF
 }
 
@@ -3372,6 +3381,58 @@ unharden_sudo() {
   log "Restoring broad NOPASSWD sudoers (install-mode)…"
   _install_sudoers_file "$(_sudoers_broad)" \
     && ok "sudoers re-broadened (suitable for setup re-runs)"
+}
+
+# --- 1b. security event log (Tier 2) ------------------------
+# Promotes the always-on Tier-1 security log (~/.local/state/dotfiles/
+# security.log, written directly by conky's health.py) to a Tier-2,
+# tamper-RESISTANT log: root-owned + `chattr +a` at
+# /var/log/dotfiles/security.log, written only by the root-owned
+# seclog-append helper via the DOTFILES_SECLOG NOPASSWD rule (added by
+# harden_sudo).  A non-root process — including one as your UID — then
+# cannot edit, truncate, or backdate the log.
+#
+# The helper MUST be installed root-owned and the log MUST be created
+# eagerly here: seclog.py only routes to Tier 2 when BOTH the root log
+# and the helper exist, so creating the empty +a log is what flips
+# health.py over to the privileged writer.
+SECLOG_HELPER_SRC="${DOTFILES_DIR}/system/usr/local/lib/dotfiles/seclog-append"
+SECLOG_HELPER_DST="/usr/local/lib/dotfiles/seclog-append"
+SECLOG_ROOT_LOG="/var/log/dotfiles/security.log"
+
+harden_seclog() {
+  log "Installing Tier-2 security log (root-owned, append-only)…"
+  if [[ ! -f "$SECLOG_HELPER_SRC" ]]; then
+    warn "seclog-append helper missing from repo ($SECLOG_HELPER_SRC) — skipping Tier 2"
+    return 1
+  fi
+  sudo install -D -m 0755 -o root -g root "$SECLOG_HELPER_SRC" "$SECLOG_HELPER_DST" \
+    || { warn "could not install seclog-append helper"; return 1; }
+  sudo install -d -m 0755 -o root -g root "$(dirname "$SECLOG_ROOT_LOG")"
+  if [[ ! -f "$SECLOG_ROOT_LOG" ]]; then
+    sudo install -m 0644 -o root -g root /dev/null "$SECLOG_ROOT_LOG"
+  fi
+  # Arm append-only.  chattr can fail on filesystems without support
+  # (the file is still root-owned, which is most of the protection), so
+  # this is a warning, not a hard failure.
+  if ! sudo chattr +a "$SECLOG_ROOT_LOG" 2>/dev/null; then
+    warn "chattr +a failed on $SECLOG_ROOT_LOG (fs may not support it; root ownership still applies)"
+  fi
+  ok "Tier-2 security log armed → $SECLOG_ROOT_LOG (view: \`seclog\`)"
+}
+
+unharden_seclog() {
+  log "Reverting Tier-2 security log (helper removed; log kept as record)…"
+  # Drop the append-only attribute so the file behaves normally again.
+  [[ -f "$SECLOG_ROOT_LOG"     ]] && sudo chattr -a "$SECLOG_ROOT_LOG"     2>/dev/null
+  [[ -f "${SECLOG_ROOT_LOG}.1" ]] && sudo chattr -a "${SECLOG_ROOT_LOG}.1" 2>/dev/null
+  # Remove the helper.  seclog.py needs BOTH helper + root log present to
+  # route to Tier 2, so removing the helper alone is enough to fall back
+  # to the Tier-1 user log; the root log is left in place as a historical
+  # audit artifact (delete it by hand if you want it gone).
+  sudo rm -f "$SECLOG_HELPER_DST"
+  sudo rmdir --ignore-fail-on-non-empty "$(dirname "$SECLOG_HELPER_DST")" 2>/dev/null || true
+  ok "Tier-2 reverted — security log falls back to ~/.local/state/dotfiles/security.log"
 }
 
 # --- 2. ufw firewall ----------------------------------------
@@ -3703,6 +3764,7 @@ harden_phase() {
   harden_dot    || warn "(DNS-over-TLS step had warnings)"
   harden_ufw    || warn "(ufw step had warnings)"
   harden_sudo   || die  "(sudoers step failed — refusing to leave system half-hardened)"
+  harden_seclog || warn "(security-log Tier-2 step had warnings; Tier-1 user log still active)"
   echo
   ok "Hardening complete."
   log "Verify: \`sudo -l\`, \`sudo ufw status\`, \`resolvectl status\`,"
@@ -3715,6 +3777,7 @@ unharden_phase() {
   log "Reverting hardening — broad sudoers, ufw off, "
   log "auto-upgrades off, DNS back to NM-managed plain resolvers."
   unharden_sudo
+  unharden_seclog
   unharden_ufw
   unharden_uu
   unharden_auditd

@@ -235,6 +235,10 @@ def _shorten_exe(p: str) -> str:
     return "…" + p[-(_EXE_MAX - 1):]
 
 
+# Suspect listeners (bound by a non-system / deleted binary) collected
+# during the render pass, logged once to the security event log below.
+_suspect_listeners: list[dict] = []
+
 # Render — sorted numerically by port so the column reads cleanly.
 for port, (proc, proto, exe) in sorted(merged.items(), key=lambda x: int(x[0])):
     key = f"{proto}:{port}:{proc}"
@@ -254,6 +258,10 @@ for port, (proc, proto, exe) in sorted(merged.items(), key=lambda x: int(x[0])):
     # health.py's broader process audit for that case.
     exe_deleted = exe.endswith("(deleted)")
     exe_suspect = exe != "?" and (exe_deleted or not _is_system_path(exe))
+    if exe_suspect:
+        _suspect_listeners.append({"proto": proto, "port": port,
+                                   "proc": proc, "exe": exe,
+                                   "deleted": exe_deleted})
     exe_short   = _shorten_exe(exe)
     # ${color5} = red.  Wrapping ONLY the path in red (not the whole
     # row) keeps the rest of the row in its row-level colour (★ yellow
@@ -276,3 +284,18 @@ for port, (proc, proto, exe) in sorted(merged.items(), key=lambda x: int(x[0])):
     else:
         head = f"   {proto:<3}  :{port:<5}  {proc:<16} "
     print(head + exe_str)
+
+# ── Security event log: record listeners bound by a non-packaged or
+# unlinked ("(deleted)") binary — a classic dropped-implant signature.
+# Best-effort; a logging hiccup must never break the panel.
+try:
+    import seclog
+    if _suspect_listeners:
+        n = len(_suspect_listeners)
+        seclog.note("rogue_listener", "bad",
+                    f"{n} listener(s) bound by non-system/deleted binary",
+                    {"listeners": _suspect_listeners[:20]})
+    else:
+        seclog.note("rogue_listener", "ok", "all listeners system-packaged")
+except Exception:
+    pass
