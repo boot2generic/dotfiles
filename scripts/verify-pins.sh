@@ -538,6 +538,7 @@ if [[ -n "$ONLY_APP" ]]; then
 fi
 
 worst=0   # 0 ok, 1 stale, 2 bad — monotonic; only ever increases.
+n_ok=0; n_stale=0; n_bad=0
 first_json=1
 [[ $MODE_JSON -eq 0 ]] || printf '['
 
@@ -546,9 +547,9 @@ while IFS=$'\t' read -r src_file _entry_idx entry_json; do
     verify_entry "$entry_json"
 
     case "$RESULT_STATUS" in
-        ok)    ;; # monotonic: ok never decreases worst
-        stale) (( worst < 1 )) && worst=1 ;;
-        bad)   worst=2 ;;
+        ok)    n_ok=$((n_ok + 1)) ;; # monotonic: ok never decreases worst
+        stale) n_stale=$((n_stale + 1)); (( worst < 1 )) && worst=1 ;;
+        bad)   n_bad=$((n_bad + 1)); worst=2 ;;
     esac
 
     if [[ $MODE_JSON -eq 1 ]]; then
@@ -587,5 +588,12 @@ done <<<"$ENTRIES"
 # the distinction so interactive users see "stale but verified" clearly.
 if [[ $STRICT_FRESH -eq 1 && $worst -eq 1 ]]; then
     worst=2
+fi
+
+# Trailing summary (human mode) — mirrors audit.sh's footer so the suite
+# reads consistently.  Exit code: 0 all fresh+verified · 1 stale · 2 bad.
+if [[ $MODE_JSON -eq 0 ]]; then
+    printf '%b── %d ok · %d stale · %d bad  %b(exit %d)%b\n' \
+        "$C_DIM" "$n_ok" "$n_stale" "$n_bad" "$C_DIM" "$worst" "$C_RST"
 fi
 exit "$worst"

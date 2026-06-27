@@ -128,9 +128,10 @@ do_drift() {
     # command-substitution closes.  `|| true` prevents `set -e` from
     # aborting on audit's expected exit 1.
     out="$(NO_COLOR=1 "$AUDIT_SH" 2>&1)" && rc=0 || rc=$?
-    # audit.sh exits 1 on BAD — that's expected, not an error here.
-    # Only treat exit >=2 as a hard failure of the audit tool itself.
-    if (( rc >= 2 )); then
+    # Unified convention: rc 0 ok · 1 warn · 2 bad (all expected drift
+    # results we parse below) · 3+ = audit tool fault.  (Previously
+    # audit.sh exited 1 for BAD; it now exits 2, matching verify-pins.)
+    if (( rc >= 3 )); then
         row bad "audit.sh" "exited $rc (tool failure, not drift)"
         return
     fi
@@ -222,10 +223,15 @@ do_disk() {
     local hits=()
     while IFS= read -r ln; do
         [[ -z "$ln" ]] && continue
-        local pct mount
+        local pct mount fstype
         pct="$(awk '{print $1}' <<<"$ln" | tr -d '%')"
         mount="$(awk '{print $2}' <<<"$ln")"
+        fstype="$(awk '{print $3}' <<<"$ln")"
         [[ "$pct" =~ ^[0-9]+$ ]] || continue
+        # Read-only AppImage mounts (fuse.squashfuse at /tmp/.mount_*) are
+        # always 100% by nature — not disk pressure.  Skip fuse* fstypes
+        # and the /.mount_* mountpoints (mirrors health.py check_fs).
+        [[ "$fstype" == fuse* || "$mount" == *"/.mount_"* ]] && continue
         if (( pct >= 95 )); then
             hits+=("${mount}=${pct}%"); worst="bad"
         elif (( pct >= 85 )); then

@@ -146,8 +146,12 @@ error_symbol   = "[❯](bold fg:#ff0055)"
 vimcmd_symbol  = "[❮](bold fg:#ff00cc)"
 
 # ── Time ─────────────────────────────────────────────────────
+# Rendered as a right-aligned "pill" (bg slab + cyan text) so it mirrors
+# the left-side OS/host badges instead of fading into the background — a
+# visual anchor on the right edge.  The leading space sits inside the
+# slab so the pill has padding.
 [time]
 disabled    = false
-style       = "fg:#5555aa"
-format      = "[$time]($style)"
+style       = "bg:#1a1a2e fg:#00e5ff"
+format      = "[ $time ]($style)"
 time_format = "%H:%M"

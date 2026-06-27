@@ -9,7 +9,7 @@ TERM       = "xterm-256color"
 COLORTERM  = "truecolor"
 
 [window]
-padding      = { x = 12, y = 10 }
+padding      = { x = 14, y = 12 }
 # `decorations = "full"` requests server-side decorations (SSD) under
 # KWin Wayland via the xdg-decoration protocol — KWin draws a real
 # Breeze title bar with close/minimise/maximise buttons.  Themed dark
@@ -22,7 +22,10 @@ padding      = { x = 12, y = 10 }
 # Under i3/X11 this is a no-op (i3 ignores app decoration requests and
 # manages borders itself per the i3 config).
 decorations  = "full"
-opacity      = 0.92
+# 0.90 (was 0.92): a touch more translucency so KWin's blur shows the
+# desktop through the terminal as frosted glass.  Pairs with the
+# stronger [Effect-blur] BlurStrength in config/plasma/kwinrc.
+opacity      = 0.90
 startup_mode = "Windowed"
 dynamic_title = true
 

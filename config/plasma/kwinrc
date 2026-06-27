@@ -21,10 +21,26 @@ Active=false
 blurEnabled=true
 contrastEnabled=true
 desktopgridEnabled=true
-diminactiveEnabled=false
+# Gentle focus depth — unfocused windows recede slightly (balanced).
+diminactiveEnabled=true
 overviewEnabled=true
 slideEnabled=true
 zoomEnabled=true
+# Window open/close motion: "Scale" (windows ease in/out instead of
+# popping).  AnimationDurationFactor=0.5 in kdeglobals keeps it snappy.
+kwin4_effect_scaleEnabled=true
+fadeEnabled=true
+
+# Frosted-glass depth.  Blur is already enabled above; this tunes its
+# strength (slider 1–15; 9 = medium-strong) with no grain.  Shows through
+# the cyberpunk-glass panels, KRunner, and the 0.90-opacity terminal.
+[Effect-blur]
+BlurStrength=9
+NoiseStrength=0
+
+# Dim-inactive: gentle so it reads as depth, not a blackout (default 25).
+[Effect-diminactive]
+Dimstrength=12
 
 [Wayland]
 EnablePrimarySelection=true

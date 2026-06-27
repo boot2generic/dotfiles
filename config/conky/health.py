@@ -60,10 +60,13 @@ RESET = "${color}"
 _SEV_COLOR = {"ok": OK, "warn": WARN, "bad": BAD, "dim": DIM, "info": OK}
 
 
-def _seclog_note(check: str, sev: str, summary: str, detail: object = None) -> None:
+def _seclog_note(check: str, sev: str, summary: str, detail: object = None,
+                 dedup: object = None) -> None:
     """Forward a check's verdict to the security event log.  `sev` is a
     conky colour constant (OK/WARN/BAD/DIM); translate it to seclog's
-    level vocabulary.  No-op when seclog is unavailable."""
+    level vocabulary.  `dedup` (optional) is a stable key for counter-type
+    checks so a ticking count doesn't re-log every cycle.  No-op when
+    seclog is unavailable."""
     if seclog is None:
         return
     level = {OK: "ok", WARN: "warn", BAD: "bad", DIM: "dim"}.get(sev, "ok")
@@ -71,9 +74,57 @@ def _seclog_note(check: str, sev: str, summary: str, detail: object = None) -> N
     if level == "dim":
         return
     try:
-        seclog.note(check, level, summary, detail)
+        seclog.note(check, level, summary, detail, dedup=dedup)
     except Exception:
         pass
+
+
+# World-readable marker written by `local_setup.sh harden` (removed by
+# unharden).  The narrow sudoers file is root-only, so this is the
+# user-readable source of truth for "am I hardened?".
+HARDENED_MARKER = Path("/etc/dotfiles-hardened")
+
+
+# ── 0a. Hardening posture (the at-a-glance "am I secure?" headline) ──
+def check_hardening_status() -> str:
+    """Green when the system is in HARDENED mode, yellow in INSTALL mode.
+
+    This is the affirmative signal the panel otherwise lacks: all-green
+    elsewhere means 'nothing detected as bad', but THIS row means
+    'protections are actively engaged'.
+    """
+    if not HARDENED_MARKER.exists():
+        return line("hardening", WARN, "install mode (run: harden)")
+    measures = ""
+    try:
+        for ln in HARDENED_MARKER.read_text().splitlines():
+            if ln.startswith("measures="):
+                measures = ln.split("=", 1)[1]
+                break
+    except OSError:
+        pass
+    # Keep it short for the panel; the full list is in `status`.
+    n = len([m for m in measures.split(",") if m]) if measures else 0
+    return line("hardening", OK, f"hardened ({n} measures)" if n else "hardened")
+
+
+# ── 0b. Disk encryption (LUKS) ──────────────────────────────
+def check_disk_encryption() -> str:
+    """WARN when / is not backed by a dm-crypt (LUKS) device.
+
+    `lsblk -nso TYPE <src>` walks the device and its parents; a `crypt`
+    line anywhere in that chain means the root filesystem sits on LUKS.
+    No sudo needed.
+    """
+    src = _run(["findmnt", "-no", "SOURCE", "/"]).strip()
+    if not src:
+        return line("disk crypto", DIM, "unknown")
+    types = _run(["lsblk", "-nso", "TYPE", src])
+    if not types:
+        return line("disk crypto", DIM, "lsblk failed")
+    if "crypt" in types.split():
+        return line("disk crypto", OK, "LUKS active on /")
+    return line("disk crypto", WARN, "/ unencrypted (see security.md)")
 
 LINE_WIDTH = 36   # fits within conky panel maximum_width=460
 
@@ -119,7 +170,13 @@ def check_fs() -> str:
         m = re.match(r"\s*(\d+)%\s+(\S+)\s+(\S+)", ln)
         if not m:
             continue
-        pct, mount, _fs = m.group(1, 2, 3)
+        pct, mount, fs = m.group(1, 2, 3)
+        # Read-only AppImage mounts (fuse.squashfuse at /tmp/.mount_*) are
+        # ALWAYS 100% by nature — they're not disk pressure.  Skip any
+        # fuse* fstype and the /.mount_* mountpoints they use, else the
+        # panel shows a permanent false-red "disk space" row.
+        if fs.startswith("fuse") or "/.mount_" in mount:
+            continue
         if int(pct) >= 85:
             full.append(f"{mount}={pct}%")
     if not full:
@@ -205,8 +262,10 @@ def check_failed_sudo() -> str:
         _seclog_note("failed_sudo", OK, "0 in 24h")
         return line("failed sudo 24h", OK, "0")
     sev = BAD if n >= 5 else WARN
+    # Counter — dedup on severity bucket so the rolling count doesn't
+    # re-log every cycle (only a OK→WARN→BAD transition writes an event).
     _seclog_note("failed_sudo", sev, f"{n} failed sudo attempts in 24h",
-                 {"count": n})
+                 {"count": n}, dedup="failed_sudo")
     return line("failed sudo 24h", sev, str(n))
 
 
@@ -633,8 +692,11 @@ def check_suspicious_paths() -> str:
     # deleted-exe" scenario can't swallow the rest of the panel.
     MAX_ROWS = 5
     indent = " " * 20
+    # Continuation rows render DIM (not per-hit severity) so the coloured
+    # HEADER above carries the alarm and the eye lands on the summary
+    # instead of a wall of red.
     for sev, detail in hits[:MAX_ROWS]:
-        out.append(f"{indent}{sev}{detail[:DETAIL_CAP]}{RESET}")
+        out.append(f"{indent}{DIM}{detail[:DETAIL_CAP]}{RESET}")
     if n > MAX_ROWS:
         out.append(f"{indent}{DIM}…and {n - MAX_ROWS} more{RESET}")
     return "\n".join(out)
@@ -914,8 +976,12 @@ def check_recent_sudo_invocations() -> str:
     sev = OK if n <= 10 else (WARN if n <= 50 else BAD)
     # Only a spike (WARN/BAD) is security-interesting; the OK case still
     # calls note() so a previous spike clearing is recorded as resolved.
+    # dedup on severity bucket ONLY — a rolling 24h count ticks and the
+    # "N ago" timestamp slides every cycle, which would otherwise re-log
+    # this event continuously.
     _seclog_note("sudo_invocations", sev, f"{n} successful sudo in 24h",
-                 {"count": n, "last_cmd": cmd, "last_rel": rel} if sev is not OK else None)
+                 {"count": n, "last_cmd": cmd, "last_rel": rel} if sev is not OK else None,
+                 dedup="sudo_invocations")
     return line("sudo ok 24h", sev, f"{n}, last {rel}: {cmd_short}")
 
 
@@ -1104,8 +1170,10 @@ def check_parent_anomaly() -> str:
     ]
     MAX_ROWS = 5
     indent = " " * 20
+    # Continuation rows DIM — the red header carries the alarm (see the
+    # matching treatment in check_suspicious_paths).
     for h in hits[:MAX_ROWS]:
-        out.append(f"{indent}{BAD}{h[:DETAIL_CAP]}{RESET}")
+        out.append(f"{indent}{DIM}{h[:DETAIL_CAP]}{RESET}")
     if n > MAX_ROWS:
         out.append(f"{indent}{DIM}…and {n - MAX_ROWS} more{RESET}")
     return "\n".join(out)
@@ -1261,6 +1329,49 @@ def check_pins() -> str:
     return line("supply chain", DIM, f"verify-pins rc={rc}")
 
 
+# ── 21b. File-integrity sentinels ───────────────────────────
+def check_fs_integrity() -> str:
+    """Monitored files that nothing legitimate should ever read or modify;
+    any access is a high-signal compromise indicator.  Delegates to
+    integrity.py (creates the sentinels on first run, then polls).  Each
+    trip is logged to seclog WITH the responsible process where it can be
+    determined (per-file check name so the dedup tracks each
+    independently — a persistent 'modified' state logs once, distinct
+    reads each log)."""
+    try:
+        import integrity
+    except Exception:
+        return line("file integrity", DIM, "module missing")
+    try:
+        integrity.ensure()
+        events = integrity.scan()
+        n = integrity.count()
+    except Exception as e:
+        return line("file integrity", DIM, f"err: {type(e).__name__}")
+
+    if not events:
+        return line("file integrity", OK, f"{n} files OK")
+
+    # Tripped — log each event (per-file check name for independent dedup).
+    for ev in events:
+        base = os.path.basename(ev["path"])
+        _seclog_note(f"fsint[{base}]", BAD,
+                     f"file integrity {ev['kind']}: {ev['path']}", ev)
+
+    def _trip_str(ev: dict) -> str:
+        b = os.path.basename(ev["path"])
+        who = ev.get("audit") or (", ".join(ev.get("open_now", [])))
+        return f"{ev['kind'].upper()} {b}" + (f" ← {who}" if who else "")
+
+    if len(events) == 1:
+        return line("file integrity", BAD, _trip_str(events[0])[:42])
+    out = [line("file integrity", BAD, f"{len(events)} alerts:")]
+    indent = " " * 20
+    for ev in events[:5]:
+        out.append(f"{indent}{DIM}{_trip_str(ev)[:42]}{RESET}")
+    return "\n".join(out)
+
+
 # ── 22. Security-log integrity (the tamper watcher) ─────────
 def check_seclog_integrity() -> str:
     """Verify the security event log hasn't been modified by anyone other
@@ -1293,6 +1404,10 @@ def check_seclog_integrity() -> str:
 # If you want either back, lift them from a prior git rev — the
 # functions were named `check_smart` and `check_storage_pools`.
 CHECKS = [
+    # Security posture headline FIRST — the at-a-glance "am I secure?"
+    # signal (hardened mode + disk encryption) heads the panel.
+    check_hardening_status,
+    check_disk_encryption,
     check_failed_services,
     check_fs,
     check_psi_memory,
@@ -1307,6 +1422,9 @@ CHECKS = [
     # never *lost* regardless of ordering — this is purely about which
     # cycle the red row surfaces on.)
     check_seclog_integrity,
+    # File-integrity sentinels — a touched monitored file is one of the
+    # strongest single-signal compromise indicators, so it sits high.
+    check_fs_integrity,
     check_failed_sudo,
     check_recent_sudo_invocations,
     # Drift checks clustered: same persistence-baseline pattern,

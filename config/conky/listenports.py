@@ -263,27 +263,21 @@ for port, (proc, proto, exe) in sorted(merged.items(), key=lambda x: int(x[0])):
                                    "proc": proc, "exe": exe,
                                    "deleted": exe_deleted})
     exe_short   = _shorten_exe(exe)
-    # ${color5} = red.  Wrapping ONLY the path in red (not the whole
-    # row) keeps the rest of the row in its row-level colour (★ yellow
-    # or section-default green), which matches the panel's existing
-    # "colour the alarming sub-element, not the whole line" idiom.
+    # A rogue listener (non-packaged or unlinked binary) is a strong
+    # post-exploit signal, so colour the WHOLE row red with a ⚠ marker —
+    # a short path like /tmp/x in red was too easy to miss when only the
+    # path was tinted.  ★ if it's also newly-appeared.  Otherwise: yellow
+    # ★ for new ports, section-default green for steady-state.
+    # (Conky's ${color} resets to the section default — no nested-colour
+    # stack — so each row carries exactly one leading colour bracket.)
     if exe_suspect:
-        exe_str = f"${{color5}}{exe_short}${{color}}"
-    else:
-        exe_str = exe_short
-
-    # Conky's ${color} resets to the section default — there's no
-    # nested-colour stack.  So we render the row as TWO concatenated
-    # segments: [marker + proto + port + proc] then [exe_str].  Each
-    # segment carries its own colour bracket, so a yellow ★ row with a
-    # red exe path renders correctly without one colour leaking into
-    # the other.
-    if is_new:
+        marker = "★" if is_new else "⚠"
+        print(f"${{color5}} {marker} {proto:<3}  :{port:<5}  {proc:<16}  {exe_short}${{color}}")
+    elif is_new:
         # ★ + colour3 (yellow) override the section's default (green).
-        head = f"${{color3}} ★ {proto:<3}  :{port:<5}  {proc:<16}${{color}} "
+        print(f"${{color3}} ★ {proto:<3}  :{port:<5}  {proc:<16}${{color}} {exe_short}")
     else:
-        head = f"   {proto:<3}  :{port:<5}  {proc:<16} "
-    print(head + exe_str)
+        print(f"   {proto:<3}  :{port:<5}  {proc:<16} {exe_short}")
 
 # ── Security event log: record listeners bound by a non-packaged or
 # unlinked ("(deleted)") binary — a classic dropped-implant signature.

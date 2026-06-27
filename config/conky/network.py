@@ -34,10 +34,15 @@ CACHE_FILE.mkdir(parents=True, exist_ok=True, mode=0o700)
 CACHE_FILE = CACHE_FILE / "network-bw.json"
 
 # Conky template colours (the conky.conf colorN aliases — keep in sync)
+# NB: up/down use green/magenta as DIRECTION hues (a throughput readout),
+# deliberately NOT the panel's green=ok / red=bad SEVERITY paradigm — these
+# numbers are informational, never an alert.  Security signals (beacons,
+# rogue listeners) live in the CONNECTIONS/PORTS sections and use the
+# severity palette there.
 C_LABEL = "${color4}"
 C_VAL   = "${color}"
-C_UP    = "${color2}"
-C_DOWN  = "${color1}"
+C_UP    = "${color2}"   # green  — bytes sent
+C_DOWN  = "${color1}"   # magenta — bytes received
 
 
 def _run(cmd: list[str], timeout: int = 2) -> str:

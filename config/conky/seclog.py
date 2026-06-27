@@ -260,6 +260,13 @@ def _emit_line(st: dict, path: Path, tier: int, record: dict) -> None:
     record.setdefault("ts", _now_iso())
     record["seq"] = int(st.get("seq", 0)) + 1
     st["seq"] = record["seq"]
+    # Attach the remediation hint here (not in append) so EVERY emitted
+    # warn/bad record gets it — including seclog_tamper events, which are
+    # written directly via _emit_line and would otherwise miss the hint.
+    if record.get("sev") in ("warn", "bad") and "fix" not in record:
+        hint = _fix_hint_for(record.get("check", ""))
+        if hint:
+            record["fix"] = hint
     line = json.dumps(record, separators=(",", ":"))
     if len(line) > MAX_RECORD_BYTES:
         line = line[:MAX_RECORD_BYTES]
@@ -267,9 +274,12 @@ def _emit_line(st: dict, path: Path, tier: int, record: dict) -> None:
     if tier == 2:
         if not _tier2_append(line):
             # Hardened but the helper failed (sudo cache lapsed, helper
-            # removed).  Don't lose the alert silently — make it visible in
-            # conky's stderr log (the live check line still goes red too).
+            # removed).  Don't lose the alert silently — record a flag the
+            # watcher row surfaces as WARN, and log to conky's stderr.
+            st["tier2_fail"] = _now_iso()
             sys.stderr.write("seclog: tier-2 append failed\n")
+        else:
+            st.pop("tier2_fail", None)
     else:
         _tier1_write(path, line)
 
@@ -334,6 +344,35 @@ def _detect(st: dict, path: Path, tier: int) -> list[dict]:
     return recs
 
 
+# Per-check remediation hints — answer "it fired, now what do I do?".
+# Injected into each warn/bad event so the next step travels WITH the
+# alert (shown by `seclog`, present in `seclog-raw` for tooling).
+_FIX_HINTS = {
+    "critfile_drift":  "review the file vs git; accept with: seclog-clear critfile",
+    "suid_drift":      "inspect the new SUID binary; accept with: seclog-clear suid",
+    "module_drift":    "check lsmod/dmesg for the module; accept: seclog-clear modules",
+    "port_drift":      "identify the listener (ss -tlnp); accept: seclog-clear ports",
+    "parent_anomaly":  "investigate/kill the child PID; read the daemon's journal",
+    "suspicious_exe":  "inspect /proc/<pid>/{exe,cmdline,comm}; kill if unexpected",
+    "hidden_pids":     "ls -l /proc/<pid>/{exe,cmdline} to identify the hidden PID",
+    "rogue_listener":  "identify the process (sudo ss -tlnp); kill if you didn't start it",
+    "netstat_beacon":  "inspect the remote IP + process; block/kill if unexpected",
+    "supply_chain":    "run scripts/verify-pins.sh; then scripts/refresh-pins.sh --app <name>",
+    "seclog_tamper":   "someone modified the security log — review the diff; investigate the host",
+    "fsint":           "a monitored file was accessed — nothing legitimate should touch it. Check the logged actor (audit/open_now); when hardened: sudo ausearch -k integrity -f <path>. Reset after investigating: python3 ~/.config/conky/integrity.py --reset",
+}
+
+
+def _fix_hint_for(check: str) -> str | None:
+    """Resolve the remediation hint for a check name, tolerating the
+    per-instance suffix some checks use (e.g. 'fsint[id_rsa_old]' →
+    'fsint')."""
+    if check in _FIX_HINTS:
+        return _FIX_HINTS[check]
+    base = check.split("[", 1)[0].split(":", 1)[0]
+    return _FIX_HINTS.get(base)
+
+
 def append(record: dict) -> None:
     """Persist one event.  Best-effort and exception-safe — a logging
     failure must never break the calling health check.
@@ -341,6 +380,8 @@ def append(record: dict) -> None:
     Before writing, detect (and log) any tampering that happened since our
     last write, so this append can't absorb it."""
     try:
+        # (Remediation hints are attached in _emit_line so tamper records
+        # written there get them too.)
         with _locked():
             st = _load_state()
             path, tier = active_log()
@@ -361,22 +402,33 @@ def _detail_hash(summary: str, detail: object) -> str:
     return h.hexdigest()[:16]
 
 
-def note(check: str, sev: str, summary: str, detail: object = None) -> None:
+def note(check: str, sev: str, summary: str, detail: object = None,
+         dedup: object = None) -> None:
     """Called by a security check every cycle with its current verdict.
 
     We log only TRANSITIONS, not every 30 s cycle, so a persistent BAD
     state writes one event, not 2880/day:
-      • WARN/BAD whose (severity, detail) differs from last time → logged.
+      • WARN/BAD whose dedup key differs from last time → logged.
       • WARN/BAD → OK → logged once as an `info` "resolved" event so the
         log shows the condition cleared (and when).
       • OK → OK and unchanged WARN/BAD → nothing.
+
+    `dedup` overrides what counts as "the same alert".  By default it's
+    derived from (summary, detail) — so a drift check re-fires when the
+    SET of changed files changes.  Rolling-window COUNTERS (sudo counts)
+    must pass a stable key (e.g. just the check name) so a ticking count
+    or a sliding "N ago" timestamp doesn't re-log every cycle; they then
+    only re-fire on a real severity transition.
     """
     try:
         sev = sev.lower()
         with _locked():
             st = _load_state()
             last = st.setdefault("last", {})
-            h = _detail_hash(summary, detail)
+            if dedup is not None:
+                h = hashlib.sha1(str(dedup).encode("utf-8", "replace")).hexdigest()[:16]
+            else:
+                h = _detail_hash(summary, detail)
             prev = last.get(check)
             changed = (prev is None or prev.get("sev") != sev or prev.get("h") != h)
             last[check] = {"sev": sev, "h": h}
@@ -486,7 +538,13 @@ def verify() -> tuple[str, str]:
                     return ("bad", "append-only removed")
                 return ("warn", "mtime touched")
 
-            # Clean.
+            # Clean.  But surface a recent Tier-2 helper failure: the log
+            # itself is intact, yet new alerts may not be reaching it.
+            # Gate on tier==2 so a stale flag left over from a previous
+            # hardened session doesn't mis-warn after unharden drops us
+            # back to the Tier-1 user log.
+            if tier == 2 and st.get("tier2_fail"):
+                return ("warn", "tier2 helper unreachable (sudo seclog-append)")
             if tier == 2:
                 return ("ok", f"guarded+a ({n_events})")
             return ("ok", f"guarded ({n_events})")
@@ -572,10 +630,12 @@ def _fmt_event(raw: str, color: bool) -> str:
         # stays one line.
         detail_str = (f"  {c['dim']}"
                       f"{json.dumps(detail, separators=(',', ':'))}{c['rst']}")
+    fix = ev.get("fix")
+    fix_str = f"  {c['info']}→ fix: {fix}{c['rst']}" if fix else ""
     return (f"{c['dim']}{ev.get('ts','?')}{c['rst']} "
             f"{col}{sev.upper():<4}{c['rst']} "
             f"{c['bold']}{ev.get('check','?')}{c['rst']} "
-            f"{ev.get('summary','')}{detail_str}")
+            f"{ev.get('summary','')}{detail_str}{fix_str}")
 
 
 def _cli_tail(n: int, follow: bool) -> int:

@@ -1,0 +1,8 @@
+# krunnerrc — KRunner (Meta-Space launcher) appearance.
+#
+# FreeFloating=true detaches KRunner from the top screen edge and renders
+# it as a centered, floating search box.  Combined with KWin's blur +
+# the cyberpunk-glass desktop theme it reads as a modern "command
+# palette" (frosted glass, centered) rather than a bar glued to the top.
+[General]
+FreeFloating=true

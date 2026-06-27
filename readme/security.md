@@ -94,6 +94,31 @@ You're meant to flip to *hardened* mode the first time everything works:
 ./local_setup.sh harden           # tighten — once
 ```
 
+### Am I hardened right now?
+
+A hardened system used to look identical to an unhardened one. Three
+surfaces now make the posture obvious at a glance:
+
+- **`./local_setup.sh status`** — a read-only dashboard: hardened-vs-install
+  mode, disk encryption (LUKS), supply-chain pins, baseline drift, and
+  recent security alerts, aggregated from `audit.sh` / `verify-pins.sh` /
+  `seclog` so you run one command instead of six.
+- **zsh login banner** — one line at session start: `✓ hardened …` or
+  `⚠ INSTALL MODE — …`. Shown once per login session.
+- **conky HEALTH panel** — the top two rows are `hardening` (green when
+  hardened, yellow in install mode) and `disk crypto` (LUKS on `/`).
+
+These read a world-readable marker `/etc/dotfiles-hardened` (written by
+`harden`, removed by `unharden`) — necessary because the narrow sudoers
+file itself is root-only, so an unprivileged shell can't infer the mode
+from it. If you hardened before this marker existed, re-run `harden`
+once to create it.
+
+> **Tool exit codes** are unified across the suite for cron/scripting:
+> `0` all clear · `1` warn/stale · `2` bad · `3` usage/tool-fault.
+> (`audit.sh` previously used `1` for bad; it now uses `2`, matching
+> `verify-pins.sh` and `dotfiles-doctor.sh`.)
+
 If you ever need to re-run `setup` (after editing the dotfiles, say),
 unharden first to give the install pipeline broad sudo:
 
@@ -714,6 +739,84 @@ panel is the **live** layer; `auditd` (Tier-2 `harden`) is the
 The seclog drift events answer "what did my own checks see change, and
 when"; cross-reference a `critfile_drift` event's timestamp against
 `sudo ausearch -k sudoers --start <time>` to get the UID that did it.
+
+---
+
+## File-integrity sentinels (decoy honeypot)
+
+A set of **decoy** files holding fake credentials that no legitimate
+application should ever read or modify — a honeypot. Any access is a
+high-signal compromise indicator (malware or an intruder enumerating
+`$HOME` for secrets). Implemented in
+[`~/.config/conky/integrity.py`](../config/conky/integrity.py), polled by
+health.py's `file integrity` HEALTH row.
+
+> **Deliberately neutral naming.** Nothing on the *live* system reveals
+> this is a honeypot: the module, the conky label, the aliases, the audit
+> key, the security-log entries, the state files, and the decoys' own
+> contents all read as ordinary **file-integrity monitoring** (a normal
+> control) plus real-looking credentials. An attacker grepping the box,
+> listing `~/.config`, reading `~/.zshrc`, or `cat`-ing a decoy gets no
+> hint it's bait. This README (in the repo, not deployed) is the only
+> place the true intent is named — keep that in mind if you treat a repo
+> checkout on the host as itself sensitive.
+
+Three decoys are created on first run (manifest-driven — edit to
+add/relocate):
+
+| Path | Looks like | Why it's safe |
+|---|---|---|
+| `~/.aws/credentials.bak` | AWS keys | aws-cli reads `credentials`, never `.bak` |
+| `~/.ssh/id_rsa_old` | an old SSH key | ssh only uses keys it's configured to |
+| `~/Documents/passwords.txt` | a password dump | nothing daemon-reads it |
+
+Each holds plausible-but-fake secrets with a unique token embedded **as a
+credential value** (no give-away comment) — grep logs / network captures
+for it to spot exfiltration. State files (all bland):
+`~/.config/conky/.integrity-paths` (manifest),
+`baseline-integrity.txt`, `~/.config/conky/.integrity-id` (the token).
+
+### Detection — two layers (fast alert + process attribution)
+
+- **Always-on (unprivileged):** the `file integrity` HEALTH row checks
+  each file every cycle. It catches **modify** (sha256) and **delete**
+  reliably, and **reads** via an atime trick — each cycle it parks the
+  file's access-time at the epoch, so on a normal `relatime` mount any
+  read bumps atime and is caught (the check reads its own copy with
+  `O_NOATIME` so it never trips itself). A trip turns the row red and
+  writes a `seclog` event (per-file, so a persistent *modified* state
+  logs once while distinct *reads* each log).
+- **Process attribution (the "who"):**
+  - *Any mode, best-effort:* on a trip it scans `/proc/*/fd` for a process
+    holding the file open **right then** (catches editors, `tail -f`, a
+    backup pass, an mmap) and records it as `open_now` in the event.
+  - *Hardened, authoritative:* `harden` adds an auditd watch
+    (`-w <file> -p rwa -k integrity`, generated from the manifest). On a
+    trip the check runs `sudo -n ausearch -k integrity -f <file>` (a
+    read-only query, allow-listed via the `DOTFILES_AUDITQ` sudoers rule)
+    and embeds the most recent **comm / pid / uid** as `audit` in the
+    event — reliable even for a one-shot `cat` and even on `noatime`.
+
+A one-shot read in *install* mode (no auditd) may log the actor as
+`unknown` — that's expected; harden for guaranteed attribution.
+
+### Triage & reset
+
+```bash
+fim                                       # list monitored files + state
+sudo ausearch -k integrity --start recent # who touched it (hardened)
+fim-reset                                 # regenerate + re-baseline
+```
+
+`fim-reset` overwrites the files — **investigate first** (it discards
+whatever an attacker left).
+
+> **False-positive note.** A desktop file indexer (KDE **baloo** on the
+> Plasma box) reads files in indexed folders, so the first index pass of
+> `~/Documents/passwords.txt` can register as a *read*. When hardened the
+> `audit` actor in the event shows `baloo_file_extr` so you can tell it
+> from a real intrusion; otherwise exclude that folder from KDE search,
+> or relocate the entry in the manifest.
 
 ---
 

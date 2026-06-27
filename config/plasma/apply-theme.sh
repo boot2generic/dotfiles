@@ -312,6 +312,30 @@ if have plasma-apply-wallpaperimage && [[ -f "$WALLPAPER" ]]; then
     fi
 fi
 
+# Lock-screen wallpaper: a blurred + slightly-darkened variant of the
+# desktop wallpaper, so the lock greeter reads as a focused frosted scene
+# (the breezedark clock floats over it).  Generated best-effort with
+# ImageMagick; we only point kscreenlockerrc at it AFTER it exists, so a
+# box without `convert` simply keeps the plain wallpaper (the static
+# kscreenlockerrc default) — never a broken/black lock background.
+LOCK_WALLPAPER="${HOME}/.config/wallpaper/wallpaper-lock.png"
+if have convert && [[ -f "$WALLPAPER" ]]; then
+    if convert "$WALLPAPER" -blur 0x8 -modulate 88 "$LOCK_WALLPAPER" 2>/dev/null \
+       && [[ -s "$LOCK_WALLPAPER" ]]; then
+        if have kwriteconfig6; then
+            kwriteconfig6 --file kscreenlockerrc \
+                --group Greeter --group Wallpaper \
+                --group org.kde.image --group General \
+                --key Image "$LOCK_WALLPAPER"
+            kwriteconfig6 --file kscreenlockerrc \
+                --group Greeter --group Wallpaper \
+                --group org.kde.image --group General \
+                --key PreviewImage "$LOCK_WALLPAPER"
+        fi
+        echo "[ok] lock-screen wallpaper blurred → $LOCK_WALLPAPER"
+    fi
+fi
+
 # Plasma desktop theme (panel/tray styling).  We ship a custom theme,
 # "cyberpunk-glass": it inherits Breeze for everything EXCEPT the panel
 # background, which it overrides with a frosted-glass (semi-transparent)

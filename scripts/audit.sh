@@ -29,10 +29,11 @@
 #                  pin freshness + sha/gpg verification status as a
 #                  pseudo-baseline row.  See gen_pins() below.
 #
-# Exit code:
-#   0  — every baseline is OK or WARN
-#   1  — at least one baseline is BAD  (cron + MAILTO catches this)
-#   2  — usage / argument error
+# Exit code (unified across the suite — audit / verify-pins / doctor):
+#   0  — all baselines OK
+#   1  — at least one baseline is WARN/stale
+#   2  — at least one baseline is BAD  (cron + MAILTO catches this)
+#   3  — usage / argument error (tool fault, not a drift result)
 #
 # Usage:
 #   ./scripts/audit.sh
@@ -53,7 +54,7 @@ log()  { echo "${C_DIM}[*]${C_RST} $*"; }
 ok()   { echo "${C_OK}[ok]${C_RST} $*"; }
 warn() { echo "${C_WARN}[!]${C_RST} $*" >&2; }
 err()  { echo "${C_ERR}[!!]${C_RST} $*" >&2; }
-die()  { err "$*"; exit 2; }
+die()  { err "$*"; exit 3; }   # 3 = usage/tool-fault (drift uses 1/2)
 
 # ── Resolve own location regardless of CWD ─────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -625,7 +626,20 @@ else
     done
 fi
 
-case "$WORST" in
-    bad) exit 1 ;;
-    *)   exit 0 ;;
-esac
+# Tally for the trailing summary + the unified exit code.  Exit-code
+# convention shared across the suite (audit / verify-pins / doctor):
+#   0 = all clear · 1 = at least one WARN · 2 = at least one BAD.
+# (Previously audit.sh exited 1 for BAD and 0 for WARN; aligned now.)
+n_ok=0; n_warn=0; n_bad=0
+for name in "${BASELINES[@]}"; do
+    case "${RESULT_STATUS[$name]}" in
+        bad)  n_bad=$((n_bad + 1)) ;;
+        warn) n_warn=$((n_warn + 1)) ;;
+        *)    n_ok=$((n_ok + 1)) ;;
+    esac
+done
+rc=0; (( n_warn > 0 )) && rc=1; (( n_bad > 0 )) && rc=2
+if [[ "${OUTPUT_JSON:-0}" != 1 ]]; then
+    echo "${C_DIM}──${C_RST} ${n_ok} ok · ${n_warn} warn · ${n_bad} bad  ${C_DIM}(exit ${rc})${C_RST}"
+fi
+exit "$rc"

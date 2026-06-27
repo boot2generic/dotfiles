@@ -25,6 +25,30 @@ plugins=(
 
 source "$ZSH/oh-my-zsh.sh"
 
+# ── Cyberpunk styling for the interactive plugins ────────────
+# zsh-autosuggestions: the ghosted inline suggestion.  Dim slate-blue so
+# it's clearly "not yet typed" but still legible against #0d0d1a.
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#5555aa'
+# zsh-syntax-highlighting: real-time validation in the cyberpunk palette —
+# a command turns green the instant it resolves to something runnable,
+# unknown commands go red, strings yellow, paths underlined cyan.
+typeset -gA ZSH_HIGHLIGHT_STYLES
+ZSH_HIGHLIGHT_STYLES[default]='fg=#e2e2ff'
+ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=#ff0055,bold'
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=#ff00cc'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=#00ff41'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=#00ff41'
+ZSH_HIGHLIGHT_STYLES[function]='fg=#00ff41'
+ZSH_HIGHLIGHT_STYLES[command]='fg=#00ff41'
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=#00ff41,underline'
+ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=#9900ff'
+ZSH_HIGHLIGHT_STYLES[path]='fg=#00e5ff,underline'
+ZSH_HIGHLIGHT_STYLES[globbing]='fg=#ffcc00'
+ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#ffcc00'
+ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#ffcc00'
+ZSH_HIGHLIGHT_STYLES[redirection]='fg=#ff00cc'
+ZSH_HIGHLIGHT_STYLES[comment]='fg=#5555aa,italic'
+
 # ── Environment ──────────────────────────────────────────────
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
@@ -149,7 +173,17 @@ elif command -v fd &>/dev/null; then
 fi
 
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-export FZF_ALT_C_OPTS="--preview 'ls -la {}'"
+
+# Ctrl-T (file picker): always show a syntax-highlighted file preview (or
+# a dir listing).  Scoped to the file/dir widgets — deliberately NOT in
+# FZF_DEFAULT_OPTS, so Ctrl-R history (where {} is a command, not a path)
+# stays clean.  bat→batcat→cat / eza→ls fallbacks keep it portable.
+_fzf_preview='if [ -d {} ]; then (eza -la --icons --color=always {} 2>/dev/null || ls -la {}); \
+else (bat --style=numbers --color=always --line-range :300 {} 2>/dev/null \
+      || batcat --style=numbers --color=always --line-range :300 {} 2>/dev/null \
+      || cat {} 2>/dev/null); fi'
+export FZF_CTRL_T_OPTS="--preview \"$_fzf_preview\" --preview-window=right:60%:wrap"
+export FZF_ALT_C_OPTS="--preview 'eza --tree --icons --level=2 --color=always {} 2>/dev/null || ls -la {}'"
 
 # ── Aliases ──────────────────────────────────────────────────
 # Editor
@@ -157,12 +191,22 @@ alias vim='nvim'
 alias vi='nvim'
 alias v='nvim'
 
-# ls
-alias ls='ls --color=auto'
-alias ll='ls -alFh'
-alias la='ls -A'
-alias l='ls -lh'
-alias lt='ls -alFht'          # sort by time
+# ls — prefer eza (icons + git status + tree) when installed, falling
+# back to GNU ls so the config is safe on a box without eza.
+if command -v eza &>/dev/null; then
+    alias ls='eza --icons --group-directories-first'
+    alias ll='eza -lah --icons --git --group-directories-first'
+    alias la='eza -a --icons --group-directories-first'
+    alias l='eza -lh --icons --git --group-directories-first'
+    alias lt='eza -lah --icons --git --sort=modified'   # sort by time
+    alias tree='eza --tree --icons --level=3'
+else
+    alias ls='ls --color=auto'
+    alias ll='ls -alFh'
+    alias la='ls -A'
+    alias l='ls -lh'
+    alias lt='ls -alFht'          # sort by time
+fi
 
 # Navigation
 alias ..='cd ..'
@@ -212,6 +256,16 @@ alias seclog-raw='python3 ~/.config/conky/seclog.py --raw'
 # named check (critfile|suid|ports|modules, default all) so the conky row
 # goes green next cycle.  Logs a `user_ack` event; never deletes history.
 alias seclog-clear='python3 ~/.config/conky/seclog.py --clear'
+
+# File integrity monitor — checks a set of watched files for any access;
+# the conky "file integrity" row goes red + a security-log event fires
+# (with the responsible process where it can be determined).
+# `fim`        → list monitored files + their state
+# `fim-reset`  → re-baseline after investigating an alert (overwrites the
+#                files; identify the actor first — when hardened:
+#                `sudo ausearch -k integrity`)
+alias fim='python3 ~/.config/conky/integrity.py --status'
+alias fim-reset='python3 ~/.config/conky/integrity.py --reset'
 
 # ── bat (pretty cat with syntax highlighting) ─────────────────
 # Debian ships bat as 'batcat'; ~/.local/bin/bat is symlinked by install script
@@ -401,3 +455,22 @@ bindkey '^R' history-fzf-disk-widget
 # ── Starship prompt ───────────────────────────────────────────
 export STARSHIP_CONFIG="$HOME/.config/starship/starship.toml"
 eval "$(starship init zsh)"
+
+# ── Security posture banner ───────────────────────────────────
+# One-line "am I hardened?" indicator at session start.  The narrow
+# sudoers file is root-only, so this world-readable marker (written by
+# `local_setup.sh harden`, removed by `unharden`) is how an unprivileged
+# shell knows the mode.  Shown ONCE per login session — the flag lives in
+# $XDG_RUNTIME_DIR, which logind wipes at logout — so new tabs stay quiet.
+if [[ -o interactive ]]; then
+    _dot_banner_flag="${XDG_RUNTIME_DIR:-$HOME/.cache}/dotfiles-banner-shown"
+    if [[ ! -e "$_dot_banner_flag" ]]; then
+        : > "$_dot_banner_flag" 2>/dev/null
+        if [[ -r /etc/dotfiles-hardened ]]; then
+            print -P "%F{green}✓ hardened%f %F{8}· narrow sudo · ufw · DoT · auditd — \`./local_setup.sh status\`%f"
+        else
+            print -P "%F{yellow}⚠ INSTALL MODE%f %F{8}— broad sudo, no firewall ·%f harden: %F{cyan}./local_setup.sh harden%f"
+        fi
+    fi
+    unset _dot_banner_flag
+fi
