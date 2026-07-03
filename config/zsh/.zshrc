@@ -5,6 +5,36 @@
 #           starship, fzf
 # ============================================================
 
+# ── tmux auto-start ──────────────────────────────────────────
+# Every new terminal lands inside tmux.  This sits ABOVE oh-my-zsh on
+# purpose: `exec` replaces this shell before any plugins load, and the
+# shell tmux then spawns pays the full init cost exactly once.
+#
+# Session policy: reattach to the first *detached* session if one
+# exists (so closing a terminal window never strands work — the next
+# terminal you open picks it right back up), otherwise start a fresh
+# session.  A second terminal opened while the first is attached gets
+# its own session rather than mirroring the same one across monitors.
+#
+# Guards, in order:
+#   $TMUX          — already inside tmux (don't nest)
+#   -o interactive — scripts and scp/rsync-style non-interactive shells
+#   command -v     — machine without tmux still gets a plain shell
+#   $TERM = linux  — raw console/TTY (recovery logins stay simple)
+#   $TERM_PROGRAM  — vscode's integrated terminal manages its own tabs
+if [[ -z "$TMUX" ]] && [[ -o interactive ]] \
+   && command -v tmux &>/dev/null \
+   && [[ "$TERM" != "linux" ]] \
+   && [[ "$TERM_PROGRAM" != "vscode" ]]; then
+    _detached="$(tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null \
+                 | awk '$2 == 0 { print $1; exit }')"
+    if [[ -n "$_detached" ]]; then
+        exec tmux attach-session -t "$_detached"
+    else
+        exec tmux new-session
+    fi
+fi
+
 # ── oh-my-zsh setup ──────────────────────────────────────────
 export ZSH="$HOME/.oh-my-zsh"
 
