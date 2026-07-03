@@ -2116,7 +2116,12 @@ patch_conky_window_type() {
       # to reread its config now via the same dbus method `systemsettings`
       # uses.  Best-effort: silent failure if dbus is unavailable
       # (e.g. running setup from an ssh session with no DBUS_SESSION_BUS_ADDRESS).
-      _conky_reload_kwin_rules
+      # `|| true` is LOAD-BEARING: the helper returns 1 when KWin is
+      # unreachable (ssh session, ISO build chroot), and a bare call under
+      # set -e aborts the whole deploy here — silently skipping everything
+      # after it (wallpaper download/generation, Pictures dir, …). That was
+      # exactly the "ISO ships without wallpaper.png" bug.
+      _conky_reload_kwin_rules || true
       ;;
     i3|*)
       sed -i "s/own_window_type[[:space:]]*=[[:space:]]*'[^']*'/own_window_type    = 'override'/" "$conf"
