@@ -229,6 +229,7 @@ The plasma path ships `~/.config/kglobalshortcutsrc` with the key bindings i3 us
 | Hotkey | Action | i3 equivalent |
 |---|---|---|
 | `Meta+Return` | Launch Alacritty | `bindsym $mod+Return exec alacritty` |
+| `Ctrl+Return` | Launch Alacritty (secondary; unbinds Konsole's launcher) | – |
 | `Meta+1`…`Meta+4` | Switch to virtual desktop 1–4 | `bindsym $mod+1..4 workspace 1..4` |
 | `Meta+Shift+1`…`Meta+Shift+4` | Move active window to desktop 1–4 | `bindsym $mod+Shift+1..4 move container to workspace 1..4` |
 | `Meta+period` / `Meta+comma` | Cycle desktop right / left | `bindsym $mod+period/comma` |

@@ -2355,7 +2355,8 @@ deploy_phase() {
       # A full-file overwrite would silently nuke all of those.  Use
       # kwriteconfig6 to surgically set ONLY the keys our shipped
       # kglobalshortcutsrc owns (Meta+1..4 desktop switching,
-      # Meta+Shift+1..4 window-to-desktop, Meta+Return → alacritty,
+      # Meta+Shift+1..4 window-to-desktop, Meta+Return / Ctrl+Return
+      # → alacritty,
       # Meta+comma/period cycle, Meta+Tab overview, Meta+Q → close
       # window) plus the plasmashell unbindings that pre-empt
       # kglobalaccel's conflict resolver (see kglobalshortcutsrc
@@ -2401,11 +2402,19 @@ deploy_phase() {
         kwriteconfig6 --file "$f" --group "services" \
           --group "org.kde.plasma.emojier.desktop" --key "_launch" \
           "none,none,Emoji Selector"
+        # Konsole's _launch owns Ctrl+Return on installed systems; clear
+        # it FIRST or the Alacritty Ctrl+Return secondary below silently
+        # no-ops (kglobalaccel never reassigns a key still owned by
+        # another service _launch — same rationale as the emojier clear).
+        kwriteconfig6 --file "$f" --group "services" \
+          --group "org.kde.konsole.desktop" --key "_launch" \
+          "none,none,Konsole"
         # services][Alacritty.desktop][_launch] — the canonical Plasma
         # surface for "global hotkey launches a .desktop file".
+        # Ctrl+Return secondary = the key Konsole used to own.
         kwriteconfig6 --file "$f" --group "services" \
           --group "Alacritty.desktop" --key "_launch" \
-          "Meta+Return,none,Alacritty"
+          "Meta+Return,Ctrl+Return,Alacritty"
         # services][cyberpunk-cheatsheet.desktop][_launch] — Meta+/
         # launches the cheatsheet popup (Plasma equivalent of i3's
         # `bindsym $mod+slash exec`).  The .desktop file is deployed

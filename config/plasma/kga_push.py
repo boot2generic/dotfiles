@@ -88,6 +88,10 @@ def build_bindings():
                 "plasmashell", "Show Activity Switcher", [0]))
     out.append(("org.kde.plasma.emojier.desktop", "_launch",
                 "Emoji Selector", "Emoji Selector", [0]))
+    # Konsole's _launch owns Ctrl+Return on installed systems; clear it
+    # so the Alacritty secondary binding below can take the key.
+    out.append(("org.kde.konsole.desktop", "_launch",
+                "Konsole", "Konsole", [0]))
 
     # 2) Switch to Desktop N → Meta+N (primary), Ctrl+F[N] (secondary).
     for n in range(1, 5):
@@ -120,10 +124,12 @@ def build_bindings():
                 [QT_META | QT_KEY_Q,
                  QT_ALT  | (QT_KEY_F1 + 3)]))
 
-    # 6) Alacritty launcher → Meta+Return.
+    # 6) Alacritty launcher → Meta+Return (primary), Ctrl+Return
+    #    (secondary — the key Konsole used to own; cleared above).
     out.append(("Alacritty.desktop", "_launch",
                 "Alacritty", "Alacritty",
-                [QT_META | QT_KEY_RETURN]))
+                [QT_META | QT_KEY_RETURN,
+                 QT_CTRL | QT_KEY_RETURN]))
 
     # 7) Cheatsheet popup → Meta+/.
     out.append(("cyberpunk-cheatsheet.desktop", "_launch",

@@ -9,7 +9,8 @@
 #     have neither the keys nor the desktops to switch between.
 #     The corresponding `Number=4` lives in config/plasma/kwinrc.
 #   • Meta+Return launches Alacritty, mirroring the i3 binding so
-#     muscle memory carries over.
+#     muscle memory carries over.  Ctrl+Return is the secondary slot,
+#     taking over the key that otherwise launches Konsole.
 #   • Meta+Q closes the focused window (i3's $mod+Shift+q without the
 #     Shift); Alt+F4 stays as the secondary slot for legacy workflows.
 #   • Meta+, / Meta+. cycle desktops left/right (i3 idiom).
@@ -21,6 +22,7 @@
 #   • [plasmashell] activate task manager entry 1..4   — claims Meta+1..4
 #   • [plasmashell] manage activities                  — claims Meta+Q
 #   • [services][org.kde.plasma.emojier.desktop] _launch — claims Meta+.
+#   • [services][org.kde.konsole.desktop] _launch       — claims Ctrl+Return
 #
 # Format (KDE Frameworks 6 / kglobalaccel):
 #     Action Name=primary,secondary,Friendly Description
@@ -93,8 +95,19 @@ manage activities=none,none,Show Activity Switcher
 # /usr/share/applications/Alacritty.desktop ships with the alacritty
 # package on Debian/Ubuntu, so the desktop-id resolves cleanly.
 # Result: Meta+Return spawns alacritty, exactly like `bindsym $mod+Return
-# exec alacritty` in i3.
-_launch=Meta+Return,none,Alacritty
+# exec alacritty` in i3.  Ctrl+Return rides in the secondary slot so the
+# key that used to launch Konsole opens alacritty instead — the Konsole
+# unbind below is load-bearing for this (kglobalaccel refuses to hand a
+# key to a new owner while another service _launch still holds it).
+_launch=Meta+Return,Ctrl+Return,Alacritty
+
+[services][org.kde.konsole.desktop]
+# Unbind Konsole's launch hotkey (Ctrl+Return on installed systems) so
+# our Alacritty Ctrl+Return secondary above can take the key.  Same
+# pre-empt rationale as the emojier below: the conflict resolver never
+# reassigns a key still owned by a service _launch, so this clear must
+# ship or the Alacritty binding silently no-ops.
+_launch=none,none,Konsole
 
 [services][org.kde.plasma.emojier.desktop]
 # Plasma 6 ships the Emoji Selector with default _launch=Meta+. — which
