@@ -8,6 +8,29 @@ time. Useful when polybar's small modules aren't enough.
 shipped a second `conky-listen.conf` for listening ports; that's been
 merged into the main panel).
 
+**Scaling:** the panel auto-scales to the display — the config is Lua,
+and at load time it multiplies every pixel/point value (fonts, panel
+width, gaps, `fs_bar` sizes) by `primary output width / 1920`, detected
+via `xrandr` (works under plasma too; conky runs on XWayland there).
+To override the auto-detection, write a single number to a `scale`
+file — e.g. `1.5` for 150%:
+
+```sh
+# survives re-deploys (dotfiles-local overlay is re-applied after
+# the deploy rsync's --delete):
+mkdir -p ~/.config/dotfiles-local/conky
+echo 1.5 > ~/.config/dotfiles-local/conky/scale
+
+# quick test without any file:
+CONKY_SCALE=1.5 ~/.config/conky/launch.sh
+```
+
+Precedence: `~/.config/conky/scale` file → `$CONKY_SCALE` env var →
+xrandr auto-detect → `1.0`.  The result is clamped to 0.75–3.0
+(below 0.75 the 6pt font floor would clip the fixed-width tables).
+Re-run `~/.config/conky/launch.sh` (or `Mod+Shift+c` under i3) after
+changing it.
+
 **Helper scripts (`~/.config/conky/`):**
 - `listenports.py` — runs `sudo -n ss -nlp` (falls back to plain `ss`
   if sudo is denied) to list TCP/UDP listening ports + the process
