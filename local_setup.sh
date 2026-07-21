@@ -1639,7 +1639,20 @@ auto_wifi_takeover() {
   state="$(nmcli -t -f DEVICE,STATE device 2>/dev/null \
            | awk -F: -v d="$wifi_iface" '$1==d {print $2; exit}' || true)"
   if [[ "$state" != "unmanaged" && "$state" != "unavailable" ]]; then
-    log "wifi ($wifi_iface) is already managed by NM — no takeover needed"
+    # "NM owns the card right now" is NOT the same claim as "NM will
+    # still own it after a reboot".  A takeover whose persistent half
+    # was skipped leaves an active ifupdown stanza behind, so `ifup -a`
+    # reclaims the card on the next boot and the user has to re-run the
+    # takeover — every single restart.  The script detects that state
+    # and repairs it without touching the live link, so let it run.
+    local tw_script="${SCRIPT_DIR}/scripts/take-over-wifi.sh"
+    if [[ -x "$tw_script" ]]; then
+      log "wifi ($wifi_iface) already NM-managed — checking the takeover survives a reboot"
+      "$tw_script" --yes \
+        || warn "wifi persistence check failed — see ${tw_script} output above"
+    else
+      log "wifi ($wifi_iface) is already managed by NM — no takeover needed"
+    fi
     return 0
   fi
 
@@ -1664,9 +1677,13 @@ auto_wifi_takeover() {
   #       widget shows nothing" bug on the T14.
   local has_creds=0
   local has_nm_profile=0
-  if [[ -r /etc/network/interfaces ]] \
+  # No `[[ -r … ]]` gate here: Debian ships /etc/network/interfaces as
+  # 0600 root whenever it holds a wpa-psk, so the unprivileged
+  # readability test is false precisely when the file DOES have creds.
+  # Let the `sudo grep` be the judge.
+  if sudo test -f /etc/network/interfaces \
      && sudo grep -qE '^[[:space:]]*wpa-(psk|passphrase|password)[[:space:]]+' \
-            /etc/network/interfaces 2>/dev/null; then
+            /etc/network/interfaces; then
     has_creds=1
   fi
   if nmcli -t -f TYPE connection show 2>/dev/null \

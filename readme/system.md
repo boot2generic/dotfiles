@@ -279,16 +279,67 @@ takeover script standalone:
 
 Run it any time after install, or whenever wifi flips back to
 `unmanaged` (some package upgrades reset NM's defaults). It detects
-the wifi iface, refuses to run if NM is already managing it, warns
-when no ethernet is up, **pre-imports SSID/PSK from
-`/etc/network/interfaces` as an NM profile** with `autoconnect=yes`,
-comments out wifi blocks in `/etc/network/interfaces` (with timestamped
-backup), stops `iwd`/`wpa_supplicant`/`systemd-networkd` if active,
-drops the NM conf.d snippet (`/etc/NetworkManager/conf.d/10-globally-managed-devices.conf`,
+the wifi iface, warns when no ethernet is up, **pre-imports SSID/PSK
+from `/etc/network/interfaces` as an NM profile** with
+`autoconnect=yes`, comments out wifi blocks in
+`/etc/network/interfaces` **and `/etc/network/interfaces.d/*`** (with
+timestamped backup), stops `iwd`/`wpa_supplicant`/`systemd-networkd`
+if active *and disables them at boot*, drops the NM conf.d snippet
+(`/etc/NetworkManager/conf.d/10-globally-managed-devices.conf`,
 `[ifupdown] managed=true`), restarts NM, and waits up to 15 s for
 auto-reconnect via the imported profile. Only if all of that fails
 (e.g., no creds were recoverable) does it fall back to an interactive
 SSID+password prompt.
+
+#### "I have to re-run the takeover after every reboot"
+
+A takeover has two halves, and only one of them is about the current
+boot:
+
+| half | what it does | if it's missing |
+| --- | --- | --- |
+| **runtime** | stop the old backend, restart NM | wifi is broken *right now* |
+| **persistent** | comment out the ifupdown stanza, `managed=true`, disable old backends at boot | wifi works now, **breaks again on the next boot** |
+
+If the persistent half is skipped, `networking.service` runs `ifup -a`
+on every boot, reads the still-active `iface wlp… inet dhcp` stanza,
+spawns its *own* `wpa_supplicant` on the card, and grabs it before NM
+gets there — so NM reports `unmanaged`/`unavailable` and you re-run the
+takeover, forever.
+
+This used to happen for a subtle reason: Debian writes
+`/etc/network/interfaces` as **mode 0600 root** whenever it holds a
+`wpa-psk`, and the script's "is there a wifi stanza here?" check used
+an *unprivileged* `grep … 2>/dev/null`. Permission-denied and "no wifi
+stanza" look identical through that check, so the comment-out step
+silently never ran. Every read of `/etc/network/interfaces*` in these
+dotfiles now goes through `sudo` — **keep it that way**.
+
+To check whether your machine is in the bad state:
+
+```bash
+systemctl is-enabled networking            # ifupdown still runs at boot?
+sudo grep -nE '^\s*(auto|allow-hotplug|iface)\s' /etc/network/interfaces
+```
+
+If an *uncommented* stanza names your wifi iface, the takeover never
+persisted. Fix it — safely, without dropping your live connection —
+with:
+
+```bash
+~/dotfiles/scripts/take-over-wifi.sh
+```
+
+When NM already owns the card, the script no longer just bails out with
+"nothing to take over". It repairs the persistent half in place
+(comment out the stanzas, ensure the conf.d snippet, disable the old
+backends at boot) and touches nothing else, so it's safe to run while
+you're online over the wifi it's fixing.
+
+Note that `wpa_supplicant.service` showing `active` while `disabled` is
+the **correct** end state — NetworkManager D-Bus-activates it on demand.
+It's only the boot-time standalone start that fights NM, so the script
+disables it rather than masking it.
 
 **Manual path** (if the script doesn't fit your case):
 

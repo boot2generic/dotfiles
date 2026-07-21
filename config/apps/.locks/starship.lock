@@ -3,7 +3,7 @@ schema_version = 1
 [lock]
 name              = "starship"
 install_method    = "github-release"
-installed_at      = "2026-07-04T16:59:53Z"
+installed_at      = "2026-07-12T22:26:32Z"
 installed_version = "v1.25.1"
 installed_sha256  = "4488c11ca632327d1f1f16fb2f102c0646094c35479cd5435991385da43c61ac"
 install_path      = "/usr/local/bin/starship"

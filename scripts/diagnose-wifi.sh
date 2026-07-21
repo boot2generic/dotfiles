@@ -164,18 +164,97 @@ redact_iface_secrets() {
         s/^([[:space:]]*wpa-(passphrase-file|psk-file)[[:space:]]+).*/\1<REDACTED-PATH>/
     '
 }
+# Debian writes /etc/network/interfaces as mode 0600 root whenever it
+# holds a wpa-psk, so the plain `< /etc/network/interfaces` redirect
+# this used to do died with "Permission denied" and printed nothing —
+# hiding the very stanza you need to see when wifi reverts to ifupdown
+# on every boot.  Read via sudo, but with -n so a passwordless-sudo-less
+# box degrades to a clear message instead of hanging on a prompt.
+# Emits the file on stdout; returns 1 (emitting NOTHING) if it can't be
+# read.  Callers MUST distinguish "unreadable" from "no wifi stanza in
+# here" — conflating those two is the original bug, and a check that
+# reports "ok" because it couldn't read the file is worse than no check.
+read_iface_raw() {
+    local f="$1"
+    if [[ -r "$f" ]]; then
+        cat -- "$f"
+        return 0
+    fi
+    sudo -n cat -- "$f" 2>/dev/null && return 0
+    return 1
+}
+
+# Display wrapper for the dump: falls back to a visible placeholder.
+cat_iface_file() {
+    local f="$1"
+    read_iface_raw "$f" \
+        || echo "($f is mode 0600 root — re-run this script with sudo to include it)"
+}
+
 section "9. /etc/network/interfaces*"
 if [[ -f /etc/network/interfaces ]]; then
-    redact_iface_secrets < /etc/network/interfaces
+    cat_iface_file /etc/network/interfaces | redact_iface_secrets
     sub "interfaces.d/ contents"
     ls /etc/network/interfaces.d/ 2>/dev/null
     for f in /etc/network/interfaces.d/*; do
         [[ -f "$f" ]] || continue
+        [[ "$f" == *.bak.* ]] && continue
         sub "$f"
-        redact_iface_secrets < "$f"
+        cat_iface_file "$f" | redact_iface_secrets
     done
 else
     echo "(no /etc/network/interfaces — pure-NM system)"
+fi
+
+# ── 9b. Will the NM takeover survive a reboot? ─────────────
+# The failure this catches: NM owns the card right now, but an active
+# ifupdown stanza is still on disk and networking.service still runs at
+# boot — so `ifup -a` spawns its own wpa_supplicant, grabs the card, and
+# you re-run the takeover after every single restart.
+sub "9b. takeover persistence (does it survive a reboot?)"
+_wifi_iface="$(nmcli -t -f DEVICE,TYPE device 2>/dev/null \
+               | awk -F: '$2 == "wifi" {print $1; exit}' || true)"
+if [[ -z "$_wifi_iface" ]]; then
+    echo "(no wifi device)"
+else
+    _claims=0
+    _unknown=0
+    for f in /etc/network/interfaces /etc/network/interfaces.d/*; do
+        [[ -f "$f" ]] || continue
+        [[ "$f" == *.bak.* ]] && continue
+        if ! _content="$(read_iface_raw "$f")"; then
+            # NOT "ok" — we simply don't know.  Say so.
+            echo "??  : $f unreadable without sudo — cannot verify (re-run with sudo)"
+            _unknown=1
+            continue
+        fi
+        if printf '%s\n' "$_content" | awk -v IF="$_wifi_iface" '
+                /^[[:space:]]*(auto|allow-hotplug)[[:space:]]+/ {
+                    for (i = 2; i <= NF; i++) if ($i == IF) { found = 1; exit }
+                }
+                /^[[:space:]]*iface[[:space:]]+/ { if ($2 == IF) { found = 1; exit } }
+                END { exit(found ? 0 : 1) }'; then
+            echo "BAD : $f still has an ACTIVE $_wifi_iface stanza"
+            _claims=1
+        fi
+    done
+    unset _content
+    (( _claims || _unknown )) \
+        || echo "ok  : no active $_wifi_iface stanza in /etc/network/interfaces*"
+
+    echo "networking.service (ifupdown) enabled at boot : $(systemctl is-enabled networking 2>&1)"
+    for _s in wpa_supplicant iwd systemd-networkd; do
+        echo "${_s} enabled at boot : $(systemctl is-enabled "$_s" 2>&1)"
+    done
+    echo "NM conf.d managed=true snippet : $(
+        [[ -f /etc/NetworkManager/conf.d/10-globally-managed-devices.conf ]] \
+          && echo present || echo MISSING)"
+    if (( _claims )) \
+       && [[ "$(systemctl is-enabled networking 2>/dev/null || true)" == "enabled" ]]; then
+        echo
+        echo ">> ifupdown will reclaim $_wifi_iface on the next boot."
+        echo ">> Fix (safe to run while online): scripts/take-over-wifi.sh"
+    fi
 fi
 
 # ── 10. systemd-networkd config ────────────────────────────

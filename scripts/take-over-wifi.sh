@@ -279,19 +279,192 @@ CURRENT_STATE="$(nmcli -t -f DEVICE,STATE device 2>/dev/null \
 log "wifi iface       : $WIFI_IFACE"
 log "current NM state : ${CURRENT_STATE:-?}"
 
+NM_CONF=/etc/NetworkManager/conf.d/10-globally-managed-devices.conf
+
+# ── Privileged reads of /etc/network/interfaces* ───────────────────
+# Debian writes /etc/network/interfaces as mode 0600 root whenever it
+# holds a wpa-psk, so EVERY read of it has to go through sudo.  This
+# used to be an unprivileged `grep … 2>/dev/null`, which made
+# "permission denied" indistinguishable from "no wifi stanza here":
+# the comment-out step below silently never ran, ifupdown kept the
+# stanza, and `ifup -a` reclaimed the card on the next boot.  That is
+# the bug that made this script something you had to re-run after
+# every restart — the runtime half took effect, the persistent half
+# never did.  If you touch these helpers, keep the sudo.
+
+# Every ifupdown config file that can claim an interface.
+iface_files() {
+    [[ -e /etc/network/interfaces ]] && printf '%s\n' /etc/network/interfaces
+    shopt -s nullglob
+    local f
+    for f in /etc/network/interfaces.d/*; do
+        [[ "$f" == *.bak.* ]] && continue
+        printf '%s\n' "$f"
+    done
+    shopt -u nullglob
+}
+
+# Does $1 carry an ACTIVE (uncommented) stanza for the wifi iface?
+# Field-based rather than one big regex, so that detection and the
+# rewrite below agree by construction: an `auto` line may list several
+# ifaces, and matching that with an ERE needs `(^|[[:space:]])`, whose
+# mid-pattern `^` is undefined in POSIX (GNU grep happens to accept it;
+# busybox need not).  A silent false negative here is the exact bug
+# this script exists to fix — don't reintroduce it for terseness.
+# Lines already commented out start with `#` and match nothing, so
+# re-running this is a no-op.
+file_claims_iface() {
+    local f="$1"
+    sudo test -f "$f" || return 1
+    sudo awk -v IF="$WIFI_IFACE" '
+        /^[[:space:]]*(auto|allow-hotplug)[[:space:]]+/ {
+            for (i = 2; i <= NF; i++) if ($i == IF) { found = 1; exit }
+        }
+        /^[[:space:]]*iface[[:space:]]+/ {
+            if ($2 == IF) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$f"
+}
+
+# Comment out the wifi iface's stanza in $1, backing up to $1.bak.$2.
+comment_out_iface_in_file() {
+    local f="$1" ts="$2" mode
+    # Preserve the original mode.  The commented-out lines STILL carry
+    # the PSK (`# disabled-by-take-over-wifi: wpa-psk hunter2`), so
+    # rewriting a 0600 file as 0644 would publish the passphrase to
+    # every local user.  Never hardcode a mode here.
+    mode="$(sudo stat -c %a "$f" 2>/dev/null || echo 600)"
+    sudo cp -a "$f" "${f}.bak.${ts}"
+    sudo awk -v IF="$WIFI_IFACE" '
+        BEGIN { in_block = 0 }
+        # `auto`/`allow-hotplug` may list several ifaces on one line.
+        # Drop just our iface; comment the line only if it named ours
+        # alone.
+        /^[[:space:]]*(auto|allow-hotplug)[[:space:]]+/ {
+            kept = ""; found = 0
+            for (i = 2; i <= NF; i++) {
+                if ($i == IF) { found = 1 } else { kept = kept " " $i }
+            }
+            if (!found) { print; next }
+            print "# disabled-by-take-over-wifi: " $0
+            if (kept != "") { print $1 kept }
+            next
+        }
+        # `iface <ours> …` — comment the header, enter the block.
+        /^[[:space:]]*iface[[:space:]]+/ {
+            if ($2 == IF) { print "# disabled-by-take-over-wifi: " $0; in_block = 1; next }
+            in_block = 0; print; next
+        }
+        # Any other top-level directive closes the block.
+        /^[^[:space:]#]/                { in_block = 0; print; next }
+        # Indented continuation of OUR block (wpa-ssid, wpa-psk, …).
+        in_block && /^[[:space:]]/      { print "# disabled-by-take-over-wifi: " $0; next }
+        { print }
+    ' "$f" | sudo install -m "$mode" /dev/stdin "${f}.new"
+    # install + mv is two privileged steps; a Ctrl-C between them would
+    # strand the .new file.  Reap it on every exit path.  The mv itself
+    # is atomic (rename(2), same filesystem).
+    # shellcheck disable=SC2064  # $f must expand now, not at trap time
+    trap "sudo rm -f '${f}.new' 2>/dev/null || true" EXIT
+    sudo mv "${f}.new" "$f"
+    trap - EXIT
+}
+
+# ── persist_takeover: the half that has to survive a reboot ────────
+# Stopping the old backend and restarting NM only fixes the CURRENT
+# boot.  What makes a takeover stick is all three of:
+#   1. no active wifi stanza in /etc/network/interfaces{,.d/*} — else
+#      ifupdown's boot-time `ifup -a` spawns its own wpa_supplicant
+#      and grabs the card before NM sees it;
+#   2. the NM conf.d snippet (managed=true);
+#   3. the old backends disabled at boot, not merely stopped.
+# Idempotent, and it never touches the live link — safe to run when
+# wifi is already up and NM-managed.  Sets PERSIST_CHANGED.
+PERSIST_CHANGED=0
+persist_takeover() {
+    local ts f svc
+    ts="$(date +%Y%m%d-%H%M%S)"
+
+    # 1. ifupdown stanzas — parent file AND interfaces.d/* fragments.
+    #    (The old code backed up the fragments but only ever rewrote
+    #    the parent, so a stanza living in interfaces.d/ survived.)
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        file_claims_iface "$f" || continue
+        log "active $WIFI_IFACE stanza found in $f"
+        comment_out_iface_in_file "$f" "$ts"
+        ok "commented out $WIFI_IFACE in $f  (backup: ${f}.bak.${ts})"
+        PERSIST_CHANGED=1
+    done < <(iface_files)
+
+    # 2. NetworkManager conf.d → managed=true.
+    if [[ ! -f "$NM_CONF" ]]; then
+        log "writing $NM_CONF …"
+        sudo install -d -m 0755 /etc/NetworkManager/conf.d
+        sudo tee "$NM_CONF" >/dev/null <<'EOF'
+# Written by scripts/take-over-wifi.sh.  Forces NetworkManager to
+# manage every interface, defeating Debian's default
+# `[ifupdown] managed=false` deference.  Remove this file to revert.
+[ifupdown]
+managed=true
+EOF
+        ok "$NM_CONF written"
+        PERSIST_CHANGED=1
+    else
+        log "$NM_CONF already present"
+    fi
+
+    # 3. Disable the old backends at BOOT.  No `--now` here: this
+    #    function runs on the already-connected path too, and we must
+    #    not drop a working link.  Note wpa_supplicant.service being
+    #    `disabled` yet `active` is the correct end state — NM
+    #    D-Bus-activates it on demand; only the boot-time standalone
+    #    start is the problem.
+    for svc in iwd wpa_supplicant systemd-networkd \
+               "wpa_supplicant@${WIFI_IFACE}" \
+               "wpa_supplicant-nl80211@${WIFI_IFACE}" \
+               "wpa_supplicant-wired@${WIFI_IFACE}"; do
+        if [[ "$(systemctl is-enabled "$svc" 2>/dev/null || true)" == "enabled" ]]; then
+            log "disabling $svc at boot …"
+            sudo systemctl disable "$svc" >/dev/null 2>&1 \
+                && { ok "$svc disabled at boot"; PERSIST_CHANGED=1; } \
+                || warn "couldn't disable $svc"
+        fi
+    done
+
+    return 0
+}
+
 case "$CURRENT_STATE" in
     "")
         die "NetworkManager doesn't see $WIFI_IFACE — check \`nmcli device\`."
         ;;
     connected|connecting|disconnected)
-        warn "$WIFI_IFACE is already managed by NM (state=$CURRENT_STATE)."
-        warn "Nothing to take over.  If the polybar pill still misbehaves,"
-        warn "run \`~/.config/polybar/scripts/wifi-menu.sh --diag\` and look"
-        warn "at the output."
+        ok "$WIFI_IFACE is already NM-managed (state=$CURRENT_STATE)."
+        log "Checking whether that survives a reboot …"
+        echo
+        # Don't just bail here.  "NM owns the card right now" and "NM
+        # will still own it after a reboot" are different claims, and
+        # the gap between them is exactly why this script kept needing
+        # a re-run: a previous run applied the runtime half, the
+        # persistent half was skipped, and ifupdown took the card back
+        # on every boot.  Repair the persistent half in place — none of
+        # it touches the live link.
+        persist_takeover
+        echo
+        if (( PERSIST_CHANGED )); then
+            ok "Persistent state repaired — the takeover should now survive reboots."
+            log "ifupdown will no longer claim $WIFI_IFACE at boot."
+        else
+            ok "Already persistent — nothing to change."
+            log "If the polybar pill still misbehaves, run"
+            log "  ~/.config/polybar/scripts/wifi-menu.sh --diag"
+        fi
         exit 0
         ;;
     unmanaged|unavailable)
-        : # proceed
+        : # proceed with the full (disruptive) takeover
         ;;
     *)
         warn "Unexpected state ($CURRENT_STATE) — proceeding cautiously"
@@ -334,7 +507,12 @@ confirm "Proceed with takeover for $WIFI_IFACE?" \
 # already knows what to connect to and reconnects automatically.
 INTERFACES_SSID=""
 INTERFACES_PSK=""
-if [[ -r /etc/network/interfaces ]]; then
+# `sudo test -r`, not `[[ -r … ]]`: the file is mode 0600 root exactly
+# when it holds a wpa-psk, so the unprivileged read test is false
+# precisely in the case this block exists to handle.  With the plain
+# `[[ -r ]]` gate, the pre-import silently never ran and every takeover
+# fell through to the interactive SSID/password prompt.
+if sudo test -r /etc/network/interfaces; then
     # Parse the matching `iface <WIFI_IFACE>` block for SSID + PSK.
     #
     # The original implementation `eval`d shell-quoted awk output, which
@@ -393,58 +571,12 @@ else
     warn "ready with both before continuing."
 fi
 
-# ── Step 1: comment out wifi entries in /etc/network/interfaces ────
-NEEDED_INTERFACES_EDIT=0
-if grep -qE "^[[:space:]]*(auto|iface|allow-hotplug)[[:space:]]+${WIFI_IFACE}([[:space:]]|$)" \
-        /etc/network/interfaces 2>/dev/null \
-   || (
-        shopt -s nullglob
-        for f in /etc/network/interfaces.d/*; do
-            grep -qE "^[[:space:]]*(auto|iface|allow-hotplug)[[:space:]]+${WIFI_IFACE}([[:space:]]|$)" "$f" 2>/dev/null \
-                && exit 0
-        done
-        exit 1
-      ); then
-    NEEDED_INTERFACES_EDIT=1
-fi
-
-if (( NEEDED_INTERFACES_EDIT )); then
-    log "Found $WIFI_IFACE references in /etc/network/interfaces*"
-    TS="$(date +%Y%m%d-%H%M%S)"
-    sudo cp -a /etc/network/interfaces "/etc/network/interfaces.bak.${TS}" \
-        2>/dev/null || true
-    sudo find /etc/network/interfaces.d -maxdepth 1 -type f \
-        -exec cp -a {} {}".bak.${TS}" \; 2>/dev/null || true
-    log "  backed up: /etc/network/interfaces*.bak.${TS}"
-
-    # Comment out: any `auto`/`iface`/`allow-hotplug` line referencing
-    # the wifi iface, AND every indented continuation line beneath an
-    # `iface` block.  Use awk for the indentation-aware part.
-    sudo awk -v IF="$WIFI_IFACE" '
-        BEGIN { in_block=0 }
-        # Standalone marker lines for the wifi iface — always comment.
-        /^[[:space:]]*(auto|allow-hotplug)[[:space:]]+/ \
-            && $2 == IF                                 { print "# disabled-by-take-over-wifi: " $0; next }
-        # Start of `iface <iface> ...` block — comment header, enter block.
-        /^[[:space:]]*iface[[:space:]]+/ && $2 == IF    { print "# disabled-by-take-over-wifi: " $0; in_block=1; next }
-        # Header for some OTHER iface — exit the block.
-        /^[[:space:]]*(iface|auto|allow-hotplug)[[:space:]]+/ && $2 != IF { in_block=0; print; next }
-        # Indented continuation of OUR block — comment it out.
-        in_block && /^[[:space:]]/                      { print "# disabled-by-take-over-wifi: " $0; next }
-        # Anything else passes through untouched.
-        { print }
-    ' /etc/network/interfaces \
-        | sudo install -m 0644 /dev/stdin /etc/network/interfaces.new
-    # The install + mv is a two-step root-privileged operation; a Ctrl-C
-    # between them leaves /etc/network/interfaces.new behind.  Cleanup
-    # trap reaps the stale .new file on any exit path (success, error,
-    # signal) so /etc/network/ never accumulates dotfiles-generated
-    # crud.  The mv itself is atomic on the same filesystem (rename(2)).
-    trap 'sudo rm -f /etc/network/interfaces.new 2>/dev/null || true' EXIT
-    sudo mv /etc/network/interfaces.new /etc/network/interfaces
-    trap - EXIT
-    ok "commented out $WIFI_IFACE block in /etc/network/interfaces"
-fi
+# ── Step 1: make the takeover persistent ───────────────────────────
+# Comments out the ifupdown stanzas, writes the NM conf.d snippet, and
+# disables the old backends at boot.  Done BEFORE we stop anything, so
+# that even if the steps below fail we don't leave a machine that
+# reverts to ifupdown on the next reboot.
+persist_takeover
 
 # ── Step 2: bring the iface down via ifupdown if it knows about it ─
 if command -v ifdown >/dev/null 2>&1; then
@@ -475,22 +607,7 @@ for svc in "wpa_supplicant@${WIFI_IFACE}" "wpa_supplicant-nl80211@${WIFI_IFACE}"
     fi
 done
 
-# ── Step 4: NetworkManager conf.d → managed=true ───────────────────
-NM_CONF=/etc/NetworkManager/conf.d/10-globally-managed-devices.conf
-if [[ ! -f "$NM_CONF" ]]; then
-    log "writing $NM_CONF …"
-    sudo install -d -m 0755 /etc/NetworkManager/conf.d
-    sudo tee "$NM_CONF" >/dev/null <<'EOF'
-# Written by scripts/take-over-wifi.sh.  Forces NetworkManager to
-# manage every interface, defeating Debian's default
-# `[ifupdown] managed=false` deference.  Remove this file to revert.
-[ifupdown]
-managed=true
-EOF
-    ok "$NM_CONF written"
-else
-    log "$NM_CONF already exists — leaving as-is"
-fi
+# ── Step 4: (was the conf.d write — now done by persist_takeover) ──
 
 # ── Step 5: restart NM ─────────────────────────────────────────────
 log "restarting NetworkManager …"
