@@ -1022,12 +1022,20 @@ def check_suid_drift() -> str:
 
     # Fresh find scan — slow (30-60s).  -xdev keeps us off network/FUSE
     # mounts; the panel cycle will block here for the duration but only
-    # once a day.
-    find_out = _run(
-        ["find", "/", "-xdev",
-         "(", "-perm", "-4000", "-o", "-perm", "-2000", ")",
-         "-type", "f"],
-        timeout=90)
+    # once a day.  NOT _run(): find exits 1 whenever it hits an
+    # unreadable dir (/root, /etc/ssl/private — guaranteed as a normal
+    # user), and check_output then discards the entire listing, so this
+    # check showed "find failed" forever.  Partial output is exactly
+    # what we want; unreadable dirs can't be diffed either way.
+    try:
+        find_out = subprocess.run(
+            ["find", "/", "-xdev",
+             "(", "-perm", "-4000", "-o", "-perm", "-2000", ")",
+             "-type", "f"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=90).stdout
+    except Exception:
+        find_out = ""
     if not find_out:
         return line("suid drift", DIM, "find failed")
 
@@ -1271,6 +1279,10 @@ def check_pins() -> str:
     candidates = [
         home / "Share" / "dotfiles" / "scripts" / "verify-pins.sh",
         Path(__file__).resolve().parent.parent.parent / "scripts" / "verify-pins.sh",
+        # Generic-OS installs bake the repo snapshot at /opt/dotfiles —
+        # without this entry every ISO install shows "verify-pins.sh
+        # missing" in the panel forever.
+        Path("/opt/dotfiles/scripts/verify-pins.sh"),
     ]
     script: Path | None = None
     for c in candidates:
