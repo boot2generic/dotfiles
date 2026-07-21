@@ -21,8 +21,12 @@ Active=false
 blurEnabled=true
 contrastEnabled=true
 desktopgridEnabled=true
-# Gentle focus depth — unfocused windows recede slightly (balanced).
-diminactiveEnabled=true
+# Dim-inactive is DISABLED: with ClickToFocus, switching virtual desktops
+# (Mod+1..4) often lands on a desktop with no focused window, so the effect
+# dimmed the *entire* screen ~12% until a window was clicked — read as the
+# screen dimming on every desktop switch and on any focus-loss during normal
+# use.  Leaving it off removes that perceived brightness change entirely.
+diminactiveEnabled=false
 overviewEnabled=true
 slideEnabled=true
 zoomEnabled=true
@@ -38,7 +42,8 @@ fadeEnabled=true
 BlurStrength=9
 NoiseStrength=0
 
-# Dim-inactive: gentle so it reads as depth, not a blackout (default 25).
+# Inert unless diminactiveEnabled=true above is flipped back on.  Kept as a
+# gentle preset (default is 25) for anyone who re-enables the effect.
 [Effect-diminactive]
 Dimstrength=12
 
